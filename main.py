@@ -20,7 +20,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import migrate_self_learning, mood, personas, scoring, store, webui_api
+from . import migrate_self_learning, mood, personas, rules_info, scoring, store, webui_api
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 API_VERSION = "affinity.v1"
@@ -45,7 +45,7 @@ SKIP_SCORING = "moe_affinity_skip_scoring"
 
 def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
-    for module in (store, scoring, mood, personas, migrate_self_learning, webui_api):
+    for module in (store, scoring, mood, personas, rules_info, migrate_self_learning, webui_api):
         try:
             importlib.reload(module)
         except Exception as exc:  # 重载失败不应让插件装不上

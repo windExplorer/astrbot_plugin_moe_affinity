@@ -275,6 +275,54 @@ def test_mood():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_rules_info():
+    print("[rules]")
+    import rules_info
+
+    data = rules_info.build(
+        rules=store.Rules(),
+        scoring_cfg=scoring.ScoringConfig(),
+        mood_cfg={
+            "enabled": True,
+            "inject": True,
+            "half_life_minutes": 90,
+            "max_delta": 2,
+            "neutral_band": 2,
+            "praise_delta": 2,
+            "negative_delta": 2,
+        },
+        stages=list(store.STAGE_TABLE),
+        version="v-test",
+    )
+    stages = data["score"]["stages"]
+    check("档位 6 行且从低到高", len(stages) == 6 and stages[0]["floor"] == 0, str(stages[:2]))
+    check("顶档没有上界", stages[-1]["ceiling"] is None, str(stages[-1]))
+    check("区间首尾相接", stages[0]["ceiling"] == 99 and stages[1]["floor"] == 100, str(stages[:2]))
+
+    deltas = {row["code"]: row["delta"] for row in data["events"]}
+    check("事件表覆盖五个内置事件", len(data["events"]) == 5, str(deltas))
+    check("每日首次 +2", deltas["chat.daily_first"] == 2, str(deltas))
+    check("负向事件为负", deltas["chat.negative"] < 0, str(deltas))
+
+    decay_rows = data["decay"]["rows"]
+    check("衰减 4 段", len(decay_rows) == 4, str(decay_rows))
+    check("宽限期不扣", decay_rows[0]["per_day"] == 0, str(decay_rows[0]))
+    check("第 15 天起每天 8", decay_rows[-1]["per_day"] == 8, str(decay_rows[-1]))
+
+    check("心情 3 条触发规则", len(data["mood"]["rows"]) == 3, str(data["mood"]["rows"]))
+    check("来源只含内置", len(data["sources"]) == 1 and data["sources"][0]["id"] == "core")
+    check("第三方占位存在", data["third_party"]["available"] is False)
+
+    wide = rules_info.build(
+        rules=store.Rules(decay_grace_days=10),
+        scoring_cfg=scoring.ScoringConfig(),
+        mood_cfg={"enabled": False},
+        stages=list(store.STAGE_TABLE),
+    )
+    ranges = [row["range"] for row in wide["decay"]["rows"]]
+    check("宽限期超 7 天不出空区间", all("11–7" not in text for text in ranges), str(ranges))
+
+
 def test_migration():
     print("[migration]")
     import sqlite3
@@ -343,6 +391,7 @@ def main():
     test_store()
     test_console_queries()
     test_mood()
+    test_rules_info()
     test_migration()
     print()
     if FAILED:

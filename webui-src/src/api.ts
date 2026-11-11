@@ -301,7 +301,45 @@ export interface MoodData {
   half_life_minutes: number;
 }
 
+export interface RuleStage {
+  key: string;
+  label: string;
+  floor: number;
+  ceiling: number | null;
+}
+
+export interface RuleEvent {
+  code: string;
+  label: string;
+  delta: number;
+  note: string;
+}
+
+export interface RulesData {
+  version: string;
+  score: { unbounded: boolean; floor: number; stages: RuleStage[]; note: string };
+  daily: { gain_cap: number; loss_cap: number; dedupe_seconds: number; note: string };
+  decay: { enabled: boolean; rows: { range: string; per_day: number }[]; note: string };
+  events: RuleEvent[];
+  keywords: { praise: string[]; negative: string[] };
+  mood: {
+    enabled: boolean;
+    inject: boolean;
+    half_life_minutes: number;
+    max_delta: number;
+    neutral_band: number;
+    axes: { key: string; label: string; rest: string }[];
+    rows: { trigger: string; changes: [string, number][]; note: string }[];
+    note: string;
+  };
+  scope: { unit: string; persona: string; group: string };
+  timing: string;
+  sources: { id: string; name: string; type: string; events: string[]; note: string }[];
+  third_party: { available: boolean; note: string };
+}
+
 export const apiPing = () => apiGet<PingInfo>("/ping");
+export const apiRules = () => apiGet<RulesData>("/rules");
 export const apiMood = (role: string) => apiGet<MoodData>(`/mood?role=${encodeURIComponent(role)}`);
 export const apiRoles = () => apiGet<{ items: RoleRow[]; total: number }>("/roles");
 export const apiRolePersonas = () =>

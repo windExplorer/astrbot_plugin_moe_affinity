@@ -34,6 +34,7 @@ import GroupView from "./views/GroupView.vue";
 import RankView from "./views/RankView.vue";
 import RolesView from "./views/RolesView.vue";
 import DataView from "./views/DataView.vue";
+import RulesView from "./views/RulesView.vue";
 import ConfigView from "./views/ConfigView.vue";
 import AuditView from "./views/AuditView.vue";
 
@@ -51,6 +52,7 @@ const router = createRouter({
     { path: "/rank", name: "rank", component: RankView, meta: { title: "排行" } },
     { path: "/roles", name: "roles", component: RolesView, meta: { title: "角色" } },
     { path: "/data", name: "data", component: DataView, meta: { title: "数据迁移" } },
+    { path: "/rules", name: "rules", component: RulesView, meta: { title: "规则说明" } },
     { path: "/config", name: "config", component: ConfigView, meta: { title: "配置" } },
     { path: "/audit", name: "audit", component: AuditView, meta: { title: "审计" } },
     { path: "/:pathMatch(.*)*", redirect: "/overview" },

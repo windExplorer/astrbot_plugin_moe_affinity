@@ -14,6 +14,7 @@ const NAV = [
   { path: "/rank", label: "排行" },
   { path: "/roles", label: "角色" },
   { path: "/data", label: "数据迁移" },
+  { path: "/rules", label: "规则说明" },
   { path: "/config", label: "配置" },
   { path: "/audit", label: "审计" },
 ];

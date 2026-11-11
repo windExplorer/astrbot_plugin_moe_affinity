@@ -26,7 +26,7 @@ try:  # quart 是 AstrBot 的运行期依赖
 except Exception:  # pragma: no cover - 仅本地静态检查时缺失
     request = None  # type: ignore
 
-from . import migrate_self_learning
+from . import migrate_self_learning, rules_info, store
 
 ROUTE_PREFIX = "/astrbot_plugin_moe_affinity"
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -369,6 +369,19 @@ async def h_mood(plugin) -> dict:
     return ok(plugin._mood_view(role))
 
 
+async def h_rules(plugin) -> dict:
+    """当前生效的规则说明（数值全部取自实时配置，改配置后这页会同步）。"""
+    return ok(
+        rules_info.build(
+            rules=plugin._rules(),
+            scoring_cfg=plugin._scoring(),
+            mood_cfg=plugin._mood_cfg(),
+            stages=list(store.STAGE_TABLE),
+            version=plugin.plugin_version,
+        )
+    )
+
+
 async def h_roles_personas(plugin) -> dict:
     """角色 ↔ 人格映射，并标出哪个人格已经从 AstrBot 里删掉。"""
     mapping = {item["persona_id"]: item["role_id"] for item in plugin.store.role_personas()}
@@ -582,6 +595,7 @@ def register_apis(plugin) -> None:
         ("/ping", h_ping, ["GET"]),
         ("/roles", h_roles, ["GET"]),
         ("/mood", h_mood, ["GET"]),
+        ("/rules", h_rules, ["GET"]),
         ("/roles/personas", h_roles_personas, ["GET"]),
         ("/roles/rename", h_role_rename, ["POST"]),
         ("/roles/merge", h_role_merge, ["POST"]),
