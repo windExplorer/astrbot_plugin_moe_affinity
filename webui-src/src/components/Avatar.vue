@@ -4,7 +4,7 @@ import { avatarOf } from "../lib/avatars";
 
 const props = withDefaults(
   defineProps<{ id: string; kind?: "user" | "group"; name?: string; size?: number }>(),
-  { kind: "user", size: 28 },
+  { kind: "user", size: 36 },
 );
 
 const src = computed(() => avatarOf(props.kind, props.id));

@@ -51,6 +51,7 @@ async function load() {
     });
     rows.value = res.rows;
     total.value = res.total;
+    missingNames.value = res.missing_names || 0;
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -76,6 +77,7 @@ onMounted(load);
 watch(() => [app.role, route.query.q, route.query.stage, route.query.sort, route.query.page], load);
 
 const syncing = ref(false);
+const missingNames = ref(0);
 
 async function syncNames() {
   syncing.value = true;
@@ -121,6 +123,16 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
         @update:value="(value: string) => patch({ sort: value, page: 1 })"
       />
     </div>
+
+    <n-alert
+      v-if="missingNames"
+      style="margin-bottom: 12px"
+      :bordered="false"
+      type="warning"
+    >
+      还有 {{ missingNames }} 人没有昵称（显示的是 QQ 号）。点右上「同步昵称」补齐，
+      群成员会逐个用 QQ 号查一次昵称，人多时会慢一点。
+    </n-alert>
 
     <div class="row" style="margin-bottom: 12px">
       <n-tag

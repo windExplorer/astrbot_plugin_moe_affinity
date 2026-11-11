@@ -9,12 +9,15 @@ const router = useRouter();
 const rows = ref<GroupRow[]>([]);
 const busy = ref(false);
 const syncing = ref(false);
+const missingGroups = ref(0);
 
 async function load() {
   if (!app.role) return;
   busy.value = true;
   try {
-    rows.value = (await apiGroups(app.role)).items;
+    const res = await apiGroups(app.role);
+    rows.value = res.items;
+    missingGroups.value = res.missing_names || 0;
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -52,6 +55,10 @@ watch(() => app.role, load);
       <span class="faint">分数是全局一份，这里统计每个群贡献了多少</span>
       <n-button size="small" quaternary :loading="syncing" @click="sync">同步群名与成员</n-button>
     </div>
+
+    <n-alert v-if="missingGroups" style="margin-bottom: 12px" :bordered="false" type="warning">
+      还有 {{ missingGroups }} 个群没有群名。点「同步群名与成员」补齐；bot 已退出的群拿不到名字。
+    </n-alert>
 
     <table>
       <thead>

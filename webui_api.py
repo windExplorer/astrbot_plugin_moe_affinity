@@ -244,6 +244,7 @@ async def h_users(plugin) -> dict:
         size=_qi("size", 50, 1, 200),
     )
     data["role_id"] = role
+    data["missing_names"] = len(plugin.store.users_without_name(1000))
     return ok(data)
 
 
@@ -262,7 +263,14 @@ async def h_user(plugin) -> dict:
 async def h_groups(plugin) -> dict:
     role = _resolve_role(plugin, _q("role"))
     rows = plugin.store.group_rows(role, plugin._rules())
-    return ok({"items": rows, "total": len(rows), "role_id": role})
+    return ok(
+        {
+            "items": rows,
+            "total": len(rows),
+            "role_id": role,
+            "missing_names": len(plugin.store.groups_without_name(500)),
+        }
+    )
 
 
 async def h_group(plugin) -> dict:
@@ -655,12 +663,20 @@ async def h_sync(plugin) -> dict:
     users: dict[str, str] = {}
     groups: dict[str, str] = {}
     errors: list[str] = []
+    member_failed = 0
+
+    # 库里还没有昵称的人 / 还没有名字的群：好友列表和群列表都不一定有它们
+    # （群成员通常不是好友），所以要单独用 get_stranger_info / get_group_info 兜底。
+    missing_users = plugin.store.users_without_name(200)
+    missing_groups = plugin.store.groups_without_name(100)
+
     for inst in platforms:
         try:
             bot = inst.get_client()
         except Exception as exc:
             errors.append(f"获取协议端客户端失败: {exc}")
             continue
+
         try:
             friends = await bot.call_action("get_friend_list")
             for friend in friends or []:
@@ -670,6 +686,7 @@ async def h_sync(plugin) -> dict:
                     users[uid] = name
         except Exception as exc:
             errors.append(f"好友列表拉取失败: {exc}")
+
         try:
             group_list = await bot.call_action("get_group_list")
             for group in group_list or []:
@@ -684,6 +701,7 @@ async def h_sync(plugin) -> dict:
                 try:
                     members = await bot.call_action("get_group_member_list", group_id=int(gid))
                 except Exception:
+                    member_failed += 1
                     continue
                 for member in members or []:
                     uid = str(member.get("user_id") or "")
@@ -691,6 +709,41 @@ async def h_sync(plugin) -> dict:
                     # 群名片优先，但好友备注已经有名字时不覆盖
                     if uid and name and uid not in users:
                         users[uid] = name
+
+        # 兜底 1：按 QQ 号查昵称（群成员不是好友时靠这个）
+        stranger_failed = 0
+        for uid in missing_users:
+            if uid in users:
+                continue
+            try:
+                info = await bot.call_action("get_stranger_info", user_id=int(uid))
+            except Exception:
+                stranger_failed += 1
+                continue
+            name = str((info or {}).get("nickname") or "").strip()
+            if name:
+                users[uid] = name
+        if stranger_failed:
+            errors.append(f"{stranger_failed} 个 QQ 号查询昵称失败（可能已注销或隐私设置）")
+
+        # 兜底 2：按群号查群名（bot 已退群时 get_group_list 里没有它）
+        group_failed = 0
+        for gid in missing_groups:
+            if gid in groups:
+                continue
+            try:
+                info = await bot.call_action("get_group_info", group_id=int(gid))
+            except Exception:
+                group_failed += 1
+                continue
+            name = str((info or {}).get("group_name") or "").strip()
+            if name:
+                groups[gid] = name
+        if group_failed:
+            errors.append(f"{group_failed} 个群查询群名失败（bot 可能已退群）")
+
+    if member_failed:
+        errors.append(f"{member_failed} 个群的成员列表拉取失败")
 
     renamed = plugin.store.upsert_user_names(users)
     group_count = plugin.store.upsert_groups(groups)

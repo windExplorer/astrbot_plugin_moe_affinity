@@ -100,7 +100,7 @@ function saved() {
   <template v-else-if="snap">
     <div class="card">
       <div class="row" style="align-items: flex-start">
-        <Avatar :id="snap.user_id" :name="snap.display_name || snap.user_id" :size="44" />
+        <Avatar :id="snap.user_id" :name="snap.display_name || snap.user_id" :size="56" />
         <div style="flex: 1; min-width: 0">
           <div style="font-size: 18px; font-weight: 650">{{ snap.display_name || snap.user_id }}</div>
           <div class="faint">{{ snap.user_id }}<span v-if="snap.platform"> · {{ snap.platform }}</span></div>

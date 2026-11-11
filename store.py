@@ -830,6 +830,26 @@ class AffinityStore:
                 updated += int(cursor.rowcount or 0)
         return updated
 
+    def users_without_name(self, limit: int = 200) -> list[str]:
+        """还没有昵称的用户 id（用于按需调 get_stranger_info 补名）。"""
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM affinities"
+                " WHERE (display_name IS NULL OR display_name = '')"
+                " ORDER BY last_interaction_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [str(row["user_id"]) for row in rows if row["user_id"]]
+
+    def groups_without_name(self, limit: int = 100) -> list[str]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT group_id FROM groups WHERE (name IS NULL OR name = '')"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [str(row["group_id"]) for row in rows if row["group_id"]]
+
     def get_avatars(self, keys: list[str]) -> dict[str, str]:
         if not keys:
             return {}

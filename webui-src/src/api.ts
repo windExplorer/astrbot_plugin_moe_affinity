@@ -176,6 +176,7 @@ export interface UsersPage {
   page: number;
   size: number;
   role_id: string;
+  missing_names: number;
 }
 
 export interface UserDetail {
@@ -397,7 +398,9 @@ export const apiUsers = (params: {
 export const apiUser = (role: string, id: string, days = 30) =>
   apiGet<UserDetail>(`/user?role=${encodeURIComponent(role)}&id=${encodeURIComponent(id)}&days=${days}`);
 export const apiGroups = (role: string) =>
-  apiGet<{ items: GroupRow[]; total: number }>(`/groups?role=${encodeURIComponent(role)}`);
+  apiGet<{ items: GroupRow[]; total: number; missing_names: number }>(
+    `/groups?role=${encodeURIComponent(role)}`,
+  );
 export const apiGroup = (role: string, id: string) =>
   apiGet<GroupDetail>(`/group?role=${encodeURIComponent(role)}&id=${encodeURIComponent(id)}`);
 export const apiSync = (members = false) =>

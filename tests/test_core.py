@@ -375,6 +375,15 @@ def test_identity_cache():
         after = db.snapshot(role, "10086", rules)
         check("昵称写入", after["display_name"] == "小明", str(after))
 
+        db.apply_event(role_id=role, user_id="20000", code="chat.message", delta=1, rules=rules)
+        check("缺名用户可列出", "20000" in db.users_without_name(), str(db.users_without_name()))
+        db.upsert_user_names({"20000": "小李"})
+        check("补名后不再列出", "20000" not in db.users_without_name())
+
+        db.upsert_groups({"123": "有名字的群", "456": ""})
+        unnamed = db.groups_without_name()
+        check("缺名群可列出", unnamed == ["456"], str(unnamed))
+
         db.put_avatars({"user:10086": "data:image/jpeg;base64,AAA"})
         got = db.get_avatars(["user:10086", "user:999"])
         check("头像缓存命中", got.get("user:10086", "").startswith("data:image"), str(got))
