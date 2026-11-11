@@ -359,6 +359,11 @@ async def h_set_config(plugin) -> dict:
     return ok({"changed": changed})
 
 
+async def h_mood(plugin) -> dict:
+    role = _resolve_role(plugin, _q("role"))
+    return ok(plugin._mood_view(role))
+
+
 async def h_roles_personas(plugin) -> dict:
     """角色 ↔ 人格映射，并标出哪个人格已经从 AstrBot 里删掉。"""
     mapping = {item["persona_id"]: item["role_id"] for item in plugin.store.role_personas()}
@@ -571,6 +576,7 @@ def register_apis(plugin) -> None:
     routes: list[tuple[str, Callable[[Any], Awaitable[dict]], list[str]]] = [
         ("/ping", h_ping, ["GET"]),
         ("/roles", h_roles, ["GET"]),
+        ("/mood", h_mood, ["GET"]),
         ("/roles/personas", h_roles_personas, ["GET"]),
         ("/roles/rename", h_role_rename, ["POST"]),
         ("/roles/merge", h_role_merge, ["POST"]),

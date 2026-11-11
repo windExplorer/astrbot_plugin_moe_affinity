@@ -283,7 +283,20 @@ export interface MigratePreview {
   message: string;
 }
 
+export interface MoodData {
+  role_id: string;
+  enabled: boolean;
+  axes: Record<string, number>;
+  raw: Record<string, number>;
+  baseline: number;
+  description: string;
+  neutral: boolean;
+  updated_at: number;
+  half_life_minutes: number;
+}
+
 export const apiPing = () => apiGet<PingInfo>("/ping");
+export const apiMood = (role: string) => apiGet<MoodData>(`/mood?role=${encodeURIComponent(role)}`);
 export const apiRoles = () => apiGet<{ items: RoleRow[]; total: number }>("/roles");
 export const apiRolePersonas = () =>
   apiGet<{ items: RolePersonaRow[]; alive: string[] }>("/roles/personas");

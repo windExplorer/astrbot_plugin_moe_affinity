@@ -229,6 +229,49 @@ def test_console_queries():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_mood():
+    print("[mood]")
+    import mood
+
+    base = mood.default_axes(5)
+    check("默认值 joy=baseline，其余=1", base["joy"] == 5 and base["anger"] == 1, str(base))
+
+    half = mood.decayed({"joy": 9, "anger": 9, "sorrow": 1, "fear": 1}, 5, 0, 90 * 60, 90)
+    check("半衰期 90 分钟折半", abs(half["joy"] - 7.0) < 0.01 and abs(half["anger"] - 5.0) < 0.01, str(half))
+
+    far = mood.decayed({"joy": 9, "anger": 9, "sorrow": 1, "fear": 1}, 5, 0, 900 * 60, 90)
+    check("长时间后回到静息", abs(far["joy"] - 5) < 0.01 and abs(far["anger"] - 1) < 0.01, str(far))
+
+    boosted = mood.apply_deltas({"joy": 5, "anger": 1, "sorrow": 1, "fear": 1},
+                                {"joy": 9, "anger": -9}, max_delta=2)
+    check("单轮变动被夹在 ±max_delta", boosted["joy"] == 7 and boosted["anger"] == 1, str(boosted))
+
+    capped = mood.apply_deltas({"joy": 10, "anger": 1, "sorrow": 1, "fear": 1},
+                               {"joy": 2}, max_delta=2)
+    check("轴上限 10", capped["joy"] == 10, str(capped))
+
+    check("平静判定", mood.is_neutral({"joy": 6, "anger": 1, "sorrow": 2, "fear": 1}, 5, 2))
+    check("非平静判定", not mood.is_neutral({"joy": 9, "anger": 1, "sorrow": 1, "fear": 1}, 5, 2))
+    check("平静文案", mood.describe({"joy": 5, "anger": 1, "sorrow": 1, "fear": 1}, 5, 2) == "心情平静")
+    check("高兴文案", "心情" in mood.describe({"joy": 9, "anger": 1, "sorrow": 1, "fear": 1}, 5, 2))
+
+    deltas = mood.deltas_from_events(["chat.praise", "chat.negative", "chat.attention"])
+    check("事件映射到心情", deltas["joy"] > 0 and deltas["anger"] > 0 and deltas["sorrow"] > 0, str(deltas))
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_mood_"))
+    try:
+        db = store.AffinityStore(tmp / "m.db")
+        check("未设置时返回 None", db.get_mood("r1") is None)
+        db.save_mood("r1", {"joy": 8, "anger": 3, "sorrow": 2, "fear": 1}, baseline=5, now=1000)
+        row = db.get_mood("r1")
+        check("心情落库", row and row["joy"] == 8 and row["baseline"] == 5, str(row))
+        db.save_mood("r1", {"joy": 7, "anger": 2, "sorrow": 2, "fear": 1}, baseline=5, now=2000)
+        row = db.get_mood("r1")
+        check("再次保存覆盖并累加 revision", row["joy"] == 7 and row["revision"] == 2, str(row))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_migration():
     print("[migration]")
     import sqlite3
@@ -296,6 +339,7 @@ def main():
     test_scoring()
     test_store()
     test_console_queries()
+    test_mood()
     test_migration()
     print()
     if FAILED:

@@ -1,5 +1,33 @@
 # 更新日志
 
+## v0.5.0 (2026-11-11)
+
+新增情绪层：角色四轴心情（喜悦 / 烦躁 / 低落 / 不安），半衰期读时投影，注入对话并在控制台可视化。
+
+**设计口径**
+
+- 心情属于**角色自己**（按 role 存），与「对谁的好感度」解耦；
+- 四轴取值 1–10，joy 回落到角色 baseline，其余三轴回落到 1；
+- **衰减只读投影**：库里只存基准值 + `updated_at`，展示/注入时按半衰期折算，不写回、无定时任务、可重放；
+- **加速封顶**：单轮每个轴最多变 `max_delta`（默认 2），一条消息不可能把心情从一端甩到另一端；
+- 规则驱动，不额外调 LLM：被夸 → joy +2；被冒犯 → anger +2、sorrow +0.5、joy −0.5；被叫 → joy +0.5。
+
+**新增**
+
+- `mood.py`：纯函数（`decayed` / `apply_deltas` / `is_neutral` / `describe` / `deltas_from_events`），可直接单测。
+- `store.py`：`moods` 表（role_id 主键）+ `get_mood` / `save_mood`，`revision` 随每次写入递增。
+- `main.py`：`_mood_view`（读时投影）、`_nudge_mood`（结算后再叠加本轮变化）；
+  `on_llm_request` 注入块增加一行「心情：…」（平静时不写，省 token）；
+  跨插件契约新增 `api.get_mood(role_id)`。
+- `webui_api.py`：`GET /mood?role=`。
+- 控制台总览新增「当前心情」雷达图 + 一句话描述（未启用时显示开关提示）。
+- `_conf_schema.json` 新增 `mood` 分组：开关、半衰期、平静带、单轮上限、是否注入、夸奖/冒犯增量。
+- `build_zip.ps1` 的 `$includeList` 增加 `mood.py`；热重载列表同步。
+- `tests/test_core.py` 增加心情用例：默认值、半衰期折半、长时间回静息、单轮夹紧、轴上下限、
+  平静判定与文案、事件映射、落库覆盖与 revision。
+
+版本 v0.4.0 -> v0.5.0。
+
 ## v0.4.0 (2026-11-11)
 
 新增角色管理页与自我学习插件迁移；顺手修掉「webui 与 @register 版本号不一致」。

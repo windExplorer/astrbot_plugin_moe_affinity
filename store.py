@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS groups (
     updated_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS moods (
+    role_id    TEXT PRIMARY KEY,
+    joy        REAL NOT NULL DEFAULT 5,
+    anger      REAL NOT NULL DEFAULT 1,
+    sorrow     REAL NOT NULL DEFAULT 1,
+    fear       REAL NOT NULL DEFAULT 1,
+    baseline   REAL NOT NULL DEFAULT 5,
+    updated_at INTEGER NOT NULL,
+    revision   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     role_id     TEXT NOT NULL,
@@ -948,6 +959,38 @@ class AffinityStore:
                 (size, (page - 1) * size),
             ).fetchall()
         return {"total": int(total), "rows": [dict(row) for row in rows], "page": page, "size": size}
+
+    # ------------------------------------------------------------------ 心情
+    def get_mood(self, role_id: str) -> dict[str, Any] | None:
+        """原始心情行（未做半衰期投影）。"""
+        with self._db() as conn:
+            row = conn.execute("SELECT * FROM moods WHERE role_id = ?", (role_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_mood(
+        self,
+        role_id: str,
+        axes: dict[str, float],
+        *,
+        baseline: float,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        moment = int(now if now is not None else time.time())
+        joy = float(axes.get("joy", baseline))
+        anger = float(axes.get("anger", 1.0))
+        sorrow = float(axes.get("sorrow", 1.0))
+        fear = float(axes.get("fear", 1.0))
+        with self._db() as conn:
+            conn.execute(
+                "INSERT INTO moods(role_id, joy, anger, sorrow, fear, baseline, updated_at, revision)"
+                " VALUES(?,?,?,?,?,?,?,1)"
+                " ON CONFLICT(role_id) DO UPDATE SET joy = excluded.joy, anger = excluded.anger,"
+                " sorrow = excluded.sorrow, fear = excluded.fear, baseline = excluded.baseline,"
+                " updated_at = excluded.updated_at, revision = moods.revision + 1",
+                (role_id, joy, anger, sorrow, fear, float(baseline), moment),
+            )
+            row = conn.execute("SELECT * FROM moods WHERE role_id = ?", (role_id,)).fetchone()
+        return dict(row) if row else {}
 
     def ping(self) -> bool:
         try:

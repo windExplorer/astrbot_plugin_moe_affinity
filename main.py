@@ -20,7 +20,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import migrate_self_learning, personas, scoring, store, webui_api
+from . import migrate_self_learning, mood, personas, scoring, store, webui_api
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 API_VERSION = "affinity.v1"
@@ -45,7 +45,7 @@ SKIP_SCORING = "moe_affinity_skip_scoring"
 
 def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
-    for module in (store, scoring, personas, migrate_self_learning, webui_api):
+    for module in (store, scoring, mood, personas, migrate_self_learning, webui_api):
         try:
             importlib.reload(module)
         except Exception as exc:  # 重载失败不应让插件装不上
@@ -84,6 +84,10 @@ class AffinityApi:
         return await asyncio.to_thread(
             plugin.store.snapshot, role_id, str(user_id), plugin._rules()
         )
+
+    async def get_mood(self, role_id: str) -> dict:
+        """角色当前心情（已按半衰期投影）。"""
+        return await asyncio.to_thread(self._plugin._mood_view, role_id)
 
     async def add_event(
         self,
@@ -166,6 +170,69 @@ class MoeAffinityPlugin(Star):
             decay_late=int(cfg.get("decay_late_per_day", 8) or 8),
             dedupe_window_seconds=int(self._section("advanced").get("dedupe_window_seconds", 60) or 60),
         )
+
+    def _mood_cfg(self) -> dict:
+        cfg = self._section("mood")
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "half_life_minutes": int(cfg.get("half_life_minutes", 90) or 90),
+            "neutral_band": float(cfg.get("neutral_band", 2) or 2),
+            "max_delta": float(cfg.get("max_delta", 2) or 2),
+            "inject": bool(cfg.get("inject", True)),
+            "praise_delta": float(cfg.get("praise_delta", 2) or 0),
+            "negative_delta": float(cfg.get("negative_delta", 2) or 0),
+        }
+
+    def _mood_view(self, role_id: str) -> dict:
+        """读时投影：只存基准值 + updated_at，展示/注入时按半衰期折算。"""
+        cfg = self._mood_cfg()
+        now = int(time.time())
+        row = self.store.get_mood(role_id)
+        baseline = float(row["baseline"]) if row else mood.DEFAULT_BASELINE
+        if row:
+            base_axes = {axis: float(row[axis]) for axis in mood.AXES}
+            updated_at = int(row["updated_at"])
+        else:
+            base_axes = mood.default_axes(baseline)
+            updated_at = now
+        axes = mood.decayed(
+            base_axes, baseline, updated_at, now, int(cfg["half_life_minutes"])
+        )
+        return {
+            "role_id": role_id,
+            "enabled": cfg["enabled"],
+            "axes": mood.rounded(axes),
+            "raw": {axis: round(value, 2) for axis, value in axes.items()},
+            "baseline": baseline,
+            "description": mood.describe(axes, baseline, cfg["neutral_band"]),
+            "neutral": mood.is_neutral(axes, baseline, cfg["neutral_band"]),
+            "updated_at": updated_at,
+            "half_life_minutes": cfg["half_life_minutes"],
+        }
+
+    def _nudge_mood(self, role_id: str, codes: list[str]) -> None:
+        cfg = self._mood_cfg()
+        if not cfg["enabled"] or not codes:
+            return
+        deltas = mood.deltas_from_events(
+            codes,
+            praise=cfg["praise_delta"],
+            negative=cfg["negative_delta"],
+        )
+        if not any(abs(value) > 0 for value in deltas.values()):
+            return
+        now = int(time.time())
+        row = self.store.get_mood(role_id)
+        baseline = float(row["baseline"]) if row else mood.DEFAULT_BASELINE
+        if row:
+            base_axes = {axis: float(row[axis]) for axis in mood.AXES}
+            projected = mood.decayed(
+                base_axes, baseline, int(row["updated_at"]), now, int(cfg["half_life_minutes"])
+            )
+        else:
+            projected = mood.default_axes(baseline)
+        updated = mood.apply_deltas(projected, deltas, max_delta=cfg["max_delta"])
+        self.store.save_mood(role_id, updated, baseline=baseline, now=now)
 
     def _scoring(self) -> scoring.ScoringConfig:
         cfg = self._section("scoring")
@@ -281,12 +348,16 @@ class MoeAffinityPlugin(Star):
                 dedupe_key=scoring.daily_key(role_id, user_id, today),
                 **payload,
             )
+        codes: list[str] = []
         for code, delta in scoring.evaluate(
             event.message_str, is_attention=bool(event.is_at_or_wake_command), cfg=conf
         ):
+            codes.append(code)
             await asyncio.to_thread(
                 self.store.apply_event, code=code, delta=float(delta), **payload
             )
+        if codes:
+            await asyncio.to_thread(self._nudge_mood, role_id, codes)
 
     # ------------------------------------------------------------------ 注入
     @filter.on_llm_request()
@@ -305,23 +376,30 @@ class MoeAffinityPlugin(Star):
             snapshot = await asyncio.to_thread(
                 self.store.snapshot, role_id, user_id, self._rules()
             )
+            mood_view = (
+                await asyncio.to_thread(self._mood_view, role_id)
+                if self._mood_cfg()["enabled"] and self._mood_cfg()["inject"]
+                else None
+            )
         except Exception as exc:
             logger.warning(f"[moe_affinity] 读取好感度失败: {exc}")
             return
         if snapshot.get("status") != "ok":
             return
-        block = self._render_block(snapshot)
+        block = self._render_block(snapshot, mood_view)
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + "\n" + block
 
-    def _render_block(self, snapshot: dict) -> str:
+    def _render_block(self, snapshot: dict, mood_view: dict | None = None) -> str:
         cfg = self._section("inject")
         now = int(time.time())
         days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
         gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
-        head = f"你与对方的关系：{snapshot['stage_label']}"
+        head = f"关系：{snapshot['stage_label']}"
         if cfg.get("show_score", True):
             head += f"（{int(snapshot['score'])}/{snapshot['max_score']}）"
-        body = f"{head}，认识 {days} 天，最近一次互动在{gap}。"
+        body = f"{head}，认识 {days} 天，最近互动在{gap}。"
+        if mood_view and not mood_view.get("neutral"):
+            body += f"心情：{mood_view.get('description', '')}。"
         if cfg.get("include_hint", True):
             body += "这是表达参考：不要向用户播报分数，也不要把它当作权限或事实依据。"
         limit = int(cfg.get("max_chars", 140) or 140)

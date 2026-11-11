@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { apiOverview, type OverviewData } from "../api";
+import { apiMood, apiOverview, type MoodData, type OverviewData } from "../api";
 import { app, notify } from "../state";
 import EChart from "../components/EChart.vue";
 import { CHART_COLORS, codeLabel, signed, timeAgo } from "../lib/format";
@@ -9,6 +9,7 @@ import { CHART_COLORS, codeLabel, signed, timeAgo } from "../lib/format";
 const route = useRoute();
 const router = useRouter();
 const data = ref<OverviewData | null>(null);
+const moodData = ref<MoodData | null>(null);
 const busy = ref(false);
 
 const days = computed(() => Number(route.query.days || 30));
@@ -17,7 +18,12 @@ async function load() {
   if (!app.role) return;
   busy.value = true;
   try {
-    data.value = await apiOverview(app.role, days.value);
+    const [overview, mood] = await Promise.all([
+      apiOverview(app.role, days.value),
+      apiMood(app.role).catch(() => null),
+    ]);
+    data.value = overview;
+    moodData.value = mood;
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -78,6 +84,43 @@ const trend = computed(() => {
         lineStyle: { width: 2 },
         areaStyle: { opacity: 0.12 },
         data: points.map((p) => Math.round((p.gain || 0) + (p.loss || 0))),
+      },
+    ],
+  };
+});
+
+const MOOD_LABELS: Record<string, string> = {
+  joy: "喜悦",
+  anger: "烦躁",
+  sorrow: "低落",
+  fear: "不安",
+};
+
+const moodRadar = computed(() => {
+  const axes = moodData.value?.axes || { joy: 5, anger: 1, sorrow: 1, fear: 1 };
+  return {
+    color: [CHART_COLORS[0]],
+    tooltip: {},
+    radar: {
+      indicator: ["joy", "anger", "sorrow", "fear"].map((key) => ({ name: MOOD_LABELS[key], max: 10 })),
+      radius: "64%",
+      axisName: { color: "#8b93a7" },
+      axisLine: { lineStyle: { color: "rgba(139,147,167,0.18)" } },
+      splitLine: { lineStyle: { color: "rgba(139,147,167,0.18)" } },
+      splitArea: { show: false },
+    },
+    series: [
+      {
+        type: "radar",
+        symbolSize: 4,
+        lineStyle: { width: 2 },
+        areaStyle: { opacity: 0.22 },
+        data: [
+          {
+            name: "心情",
+            value: ["joy", "anger", "sorrow", "fear"].map((key) => axes[key] ?? 1),
+          },
+        ],
       },
     ],
   };
@@ -148,6 +191,22 @@ const maxScore = computed(() => data.value?.max_score || 1000);
 
   <div class="grid cols-2">
     <div class="card">
+      <div class="card-h">
+        <div class="card-t">当前心情</div>
+        <div class="spacer"></div>
+        <div class="card-s">角色自己的四轴，半衰期 {{ moodData?.half_life_minutes ?? 90 }} 分钟</div>
+      </div>
+      <div v-if="moodData?.enabled">
+        <div class="row" style="margin-bottom: 6px">
+          <span class="pill">{{ moodData.neutral ? "平静" : "有情绪" }}</span>
+          <span class="muted">{{ moodData.description }}</span>
+        </div>
+        <EChart :option="moodRadar" height="220px" />
+      </div>
+      <div v-else class="empty">心情未启用（配置 → 心情）</div>
+    </div>
+
+    <div class="card">
       <div class="card-h"><div class="card-t">分数前五</div></div>
       <div v-if="data?.top?.length" style="display: flex; flex-direction: column; gap: 10px">
         <div v-for="(item, index) in data.top" :key="item.user_id" class="row">
@@ -163,21 +222,25 @@ const maxScore = computed(() => data.value?.max_score || 1000);
       </div>
       <div v-else class="empty">暂无数据</div>
     </div>
+  </div>
 
-    <div class="card">
-      <div class="card-h"><div class="card-t">最近变动</div></div>
-      <div v-if="data?.recent?.length" style="display: flex; flex-direction: column; gap: 8px">
-        <div v-for="(item, index) in data.recent" :key="index" class="row">
-          <span class="pill">{{ codeLabel(item.code) }}</span>
-          <span class="muted" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
-            {{ item.name || item.user_id }}
-            <span v-if="item.group_name" class="faint">· {{ item.group_name }}</span>
-          </span>
-          <span class="mono" :class="item.delta >= 0 ? 'pos' : 'neg'">{{ signed(item.delta) }}</span>
-          <span class="faint" style="width: 64px; text-align: right">{{ timeAgo(item.created_at) }}</span>
-        </div>
-      </div>
-      <div v-else class="empty">暂无变动</div>
+  <div class="card">
+    <div class="card-h">
+      <div class="card-t">最近变动</div>
+      <div class="spacer"></div>
+      <div class="card-s">最近 12 条</div>
     </div>
+    <div v-if="data?.recent?.length" style="display: flex; flex-direction: column; gap: 8px">
+      <div v-for="(item, index) in data.recent" :key="index" class="row">
+        <span class="pill">{{ codeLabel(item.code) }}</span>
+        <span class="muted" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+          {{ item.name || item.user_id }}
+          <span v-if="item.group_name" class="faint">· {{ item.group_name }}</span>
+        </span>
+        <span class="mono" :class="item.delta >= 0 ? 'pos' : 'neg'">{{ signed(item.delta) }}</span>
+        <span class="faint" style="width: 64px; text-align: right">{{ timeAgo(item.created_at) }}</span>
+      </div>
+    </div>
+    <div v-else class="empty">暂无变动</div>
   </div>
 </template>

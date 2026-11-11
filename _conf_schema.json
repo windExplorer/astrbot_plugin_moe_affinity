@@ -117,6 +117,52 @@
       }
     }
   },
+  "mood": {
+    "type": "object",
+    "description": "心情（角色自己的四轴）",
+    "hint": "心情按角色保存，与对谁的好感度无关；衰减是读时投影，不写库。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用心情",
+        "default": true
+      },
+      "half_life_minutes": {
+        "type": "int",
+        "description": "回落半衰期（分钟）",
+        "hint": "90 分钟意味着一小时后偏离量剩一半（约 41%），两小时后约 17%。",
+        "default": 90
+      },
+      "neutral_band": {
+        "type": "int",
+        "description": "平静带宽度",
+        "hint": "所有轴离静息值都不超过这个数时，视为「心情平静」，注入时不额外描述。",
+        "default": 2
+      },
+      "max_delta": {
+        "type": "int",
+        "description": "单轮最大变动",
+        "hint": "一条消息最多让某个轴变这么多，防止从一端甩到另一端。",
+        "default": 2
+      },
+      "inject": {
+        "type": "bool",
+        "description": "把心情注入对话",
+        "default": true
+      },
+      "praise_delta": {
+        "type": "int",
+        "description": "被夸奖时 joy 增量",
+        "default": 2
+      },
+      "negative_delta": {
+        "type": "int",
+        "description": "被冒犯时 anger 增量",
+        "hint": "同时 sorrow +0.5、joy -0.5（固定系数）。",
+        "default": 2
+      }
+    }
+  },
   "inject": {
     "type": "object",
     "description": "对话注入",
