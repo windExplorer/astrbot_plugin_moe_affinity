@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { apiResetScore, apiSetScore, type UserRow } from "../api";
 import { notify } from "../state";
 
-const props = defineProps<{ user: UserRow; role: string; maxScore?: number }>();
+const props = defineProps<{ user: UserRow; role: string }>();
 const emit = defineEmits<{ (e: "close"): void; (e: "saved"): void }>();
 
 const visible = ref(true);

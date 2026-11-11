@@ -71,18 +71,22 @@ def read_legacy(db_path: Path) -> list[dict[str, Any]]:
     return sorted(by_user.values(), key=lambda item: item["ratio"], reverse=True)
 
 
-def build_plan(legacy_rows: list[dict[str, Any]], target_max: int) -> list[dict[str, Any]]:
-    """把老库记录换算成目标分数。"""
-    upper = max(1, int(target_max))
+# 老库是 100 分制，我们无上限；按「老库满分对应 1000 分（亲密档）」换算，
+# 这样迁移过来的熟人不会一上来就顶到羁绊。
+MIGRATION_SCALE = 1000
+
+
+def build_plan(legacy_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把老库记录换算成目标分数（比例 × MIGRATION_SCALE，不设上限）。"""
     plan = []
     for row in legacy_rows:
-        target = int(round(row["ratio"] * upper))
+        target = int(round(row["ratio"] * MIGRATION_SCALE))
         plan.append(
             {
                 "user_id": row["user_id"],
                 "legacy_score": round(row["best_score"], 1),
                 "legacy_max": round(row["best_limit"], 1),
-                "target_score": max(0, min(upper, target)),
+                "target_score": max(0, target),
                 "groups": row["groups"],
                 "group_count": len(row["groups"]),
                 "last_at": int(row["last_at"]),

@@ -19,7 +19,7 @@ const page = computed(() => Number(route.query.page || 1));
 const size = computed(() => Number(route.query.size || 50));
 const stage = computed(() => String(route.query.stage || ""));
 const sort = computed(() => String(route.query.sort || "score"));
-const maxScore = computed(() => 1000);
+
 
 const STAGES = [
   { key: "", label: "全部" },
@@ -149,7 +149,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           <td>
             <div class="row">
               <div class="bar" style="width: 110px">
-                <i :style="{ width: Math.min(100, (row.score / maxScore) * 100) + '%' }"></i>
+                <i :style="{ width: Math.min(100, row.progress * 100) + '%' }"></i>
               </div>
               <span class="mono">{{ row.score }}</span>
             </div>
@@ -179,7 +179,6 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
     v-if="adjustTarget"
     :user="adjustTarget"
     :role="app.role"
-    :max-score="maxScore"
     @close="adjustTarget = null"
     @saved="onSaved"
   />

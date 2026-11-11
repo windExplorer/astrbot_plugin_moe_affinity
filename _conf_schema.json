@@ -8,14 +8,8 @@
   "affinity": {
     "type": "object",
     "description": "好感度数值",
-    "hint": "分数按角色×用户唯一，闲置衰减在读写时惰性结算。",
+    "hint": "分数按角色×用户唯一、无上限，档位按绝对阈值：眼熟 100 / 熟悉 300 / 亲近 600 / 亲密 1000 / 羁绊 2000。",
     "items": {
-      "max_score": {
-        "type": "int",
-        "description": "分数上限",
-        "hint": "默认 1000。档位按比例划分：85% 羁绊 / 65% 亲密 / 45% 亲近 / 25% 熟悉 / 10% 眼熟。",
-        "default": 1000
-      },
       "daily_gain_cap": {
         "type": "int",
         "description": "每日涨分上限",

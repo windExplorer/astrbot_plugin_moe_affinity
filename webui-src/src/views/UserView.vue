@@ -31,8 +31,7 @@ onMounted(load);
 watch(() => [app.role, userId.value], load);
 
 const snap = computed(() => detail.value?.snapshot as any);
-const maxScore = computed(() => snap.value?.max_score || 1000);
-const ratio = computed(() => Math.min(100, ((snap.value?.score || 0) / maxScore.value) * 100));
+const ratio = computed(() => Math.min(100, (snap.value?.progress || 0) * 100));
 const knownDays = computed(() =>
   snap.value ? Math.max(0, Math.floor((Date.now() / 1000 - snap.value.first_seen_at) / 86400)) : 0,
 );
@@ -115,8 +114,11 @@ function saved() {
 
       <div class="row" style="margin-top: 16px">
         <div style="font-size: 30px; font-weight: 700" class="mono">{{ snap.score }}</div>
-        <div class="muted">/ {{ maxScore }}</div>
+        <div class="muted">分</div>
         <span class="pill">{{ snap.stage_label }}</span>
+        <span v-if="snap.next_stage_label" class="faint">
+          距{{ snap.next_stage_label }}还差 {{ Math.max(0, Math.ceil(snap.next_stage_at - snap.score)) }}
+        </span>
         <div class="spacer"></div>
         <span class="faint">历史最高 {{ snap.peak }} · 本角色第 {{ snap.rank }} 名</span>
       </div>
@@ -207,7 +209,6 @@ function saved() {
     v-if="editing && asRow"
     :user="asRow"
     :role="app.role"
-    :max-score="maxScore"
     @close="editing = false"
     @saved="saved"
   />

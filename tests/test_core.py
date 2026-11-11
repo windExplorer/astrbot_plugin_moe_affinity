@@ -59,13 +59,16 @@ def test_schema():
 # ---------------------------------------------------------------- 档位
 def test_stage():
     print("[stage]")
-    cases = [(0, "stranger"), (99, "stranger"), (100, "known"), (249, "known"),
-             (250, "familiar"), (449, "familiar"), (450, "close"), (649, "close"),
-             (650, "intimate"), (849, "intimate"), (850, "bonded"), (1000, "bonded")]
+    cases = [(0, "stranger"), (99, "stranger"), (100, "known"), (299, "known"),
+             (300, "familiar"), (599, "familiar"), (600, "close"), (999, "close"),
+             (1000, "intimate"), (1999, "intimate"), (2000, "bonded"), (99999, "bonded")]
     for score, expect in cases:
-        got, _label = store.stage_of(score, 1000)
+        got, _label = store.stage_of(score)
         check(f"{score} -> {expect}", got == expect, f"got {got}")
-    check("上限为 100 时按比例", store.stage_of(85, 100)[0] == "bonded")
+    info = store.stage_info(650)
+    check("段内进度 650/600-1000", info["stage"] == "close" and 0 < info["progress"] < 1, str(info))
+    check("顶档进度恒为 1", store.stage_info(5000)["progress"] == 1.0)
+    check("下一档阈值", store.stage_info(650)["next_stage_at"] == 1000, str(store.stage_info(650)))
 
 
 # ---------------------------------------------------------------- 衰减
@@ -311,11 +314,11 @@ def test_migration():
         check("同一用户取最高分", best["best_score"] == 80, str(best))
         check("保留全部群记录", len(best["groups"]) == 2, str(best["groups"]))
 
-        plan = mig.build_plan(legacy, 1000)
+        plan = mig.build_plan(legacy)
         mapped = {item["user_id"]: item["target_score"] for item in plan}
         check("比例换算 80/100 -> 800", mapped["u1"] == 800, str(mapped))
         check("比例换算 50/100 -> 500", mapped["u2"] == 500, str(mapped))
-        check("换算后不超上限", all(item["target_score"] <= 1000 for item in plan))
+        check("换算不做上限裁剪", all(item["target_score"] >= 0 for item in plan))
 
         evidence = json.loads(mig.evidence_json(plan[0]))
         check("evidence 记录来源与群明细", evidence["from"] == "self_learning" and evidence["groups"], str(evidence))

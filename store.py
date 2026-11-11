@@ -20,15 +20,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-# 档位表：(分数占上限的比例下界, 键, 中文名)，从高到低匹配
-STAGE_TABLE: tuple[tuple[float, str, str], ...] = (
-    (0.85, "bonded", "羁绊"),
-    (0.65, "intimate", "亲密"),
-    (0.45, "close", "亲近"),
-    (0.25, "familiar", "熟悉"),
-    (0.10, "known", "眼熟"),
-    (0.00, "stranger", "陌生"),
+# 档位表：(分数下界, 键, 中文名)，从高到低匹配。
+# 分数**无上限**，所以档位只能用绝对阈值，不能按比例划分。
+STAGE_TABLE: tuple[tuple[int, str, str], ...] = (
+    (2000, "bonded", "羁绊"),
+    (1000, "intimate", "亲密"),
+    (600, "close", "亲近"),
+    (300, "familiar", "熟悉"),
+    (100, "known", "眼熟"),
+    (0, "stranger", "陌生"),
 )
+
+TOP_STAGE_AT = STAGE_TABLE[0][0]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS roles (
@@ -108,7 +111,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_events_dedupe
 class Rules:
     """一次结算需要的全部数值规则（由插件配置构造，避免 store 依赖配置对象）。"""
 
-    max_score: int = 1000
     daily_gain_cap: int = 30
     daily_loss_cap: int = 20
     decay_enabled: bool = True
@@ -119,14 +121,38 @@ class Rules:
     dedupe_window_seconds: int = 60
 
 
-def stage_of(score: float, max_score: int) -> tuple[str, str]:
-    """分数 → (档位键, 中文挡位名)。"""
-    upper = max(1, int(max_score))
-    ratio = max(0.0, min(1.0, float(score) / upper))
-    for edge, key, label in STAGE_TABLE:
-        if ratio >= edge:
+def stage_of(score: float) -> tuple[str, str]:
+    """分数 → (档位键, 中文挡位名)。分数无上限，档位按绝对阈值。"""
+    value = float(score)
+    for floor, key, label in STAGE_TABLE:
+        if value >= floor:
             return key, label
     return "stranger", "陌生"
+
+
+def stage_info(score: float) -> dict[str, Any]:
+    """档位 + 当前段内进度，供控制台的分数条使用。"""
+    value = max(0.0, float(score))
+    key, label = stage_of(value)
+    floors = [floor for floor, _k, _l in STAGE_TABLE]
+    floor = next((f for f in floors if value >= f), 0)
+    index = floors.index(floor)
+    ceiling = floors[index - 1] if index > 0 else None
+    if ceiling is None:
+        progress = 1.0
+        next_label = ""
+    else:
+        span = max(1, ceiling - floor)
+        progress = max(0.0, min(1.0, (value - floor) / span))
+        next_label = STAGE_TABLE[index - 1][2]
+    return {
+        "stage": key,
+        "stage_label": label,
+        "stage_floor": floor,
+        "next_stage_at": ceiling,
+        "next_stage_label": next_label,
+        "progress": round(progress, 4),
+    }
 
 
 def decay_for_days(
@@ -428,7 +454,8 @@ class AffinityStore:
             elif duplicate:
                 state = "duplicate"
 
-            after = max(0.0, min(settled + applied, float(rules.max_score)))
+            # 分数无上限，只有下限 0
+            after = max(0.0, settled + applied)
             applied = after - settled
             if duplicate or applied == 0:
                 # 没有实际分差就不写流水，但衰减结算仍要落库
@@ -500,7 +527,7 @@ class AffinityStore:
         if row is None:
             return {"status": "not_recorded", "role_id": role_id, "user_id": user_id}
         score = float(row["score"])
-        stage_key, stage_label = stage_of(score, rules.max_score)
+        info = stage_info(score)
         higher = conn.execute(
             "SELECT COUNT(*) AS c FROM affinities WHERE role_id = ? AND score > ?",
             (role_id, score),
@@ -513,9 +540,12 @@ class AffinityStore:
             "platform": row["platform"],
             "score": round(score, 1),
             "peak": round(float(row["peak"]), 1),
-            "max_score": rules.max_score,
-            "stage": stage_key,
-            "stage_label": stage_label,
+            "stage": info["stage"],
+            "stage_label": info["stage_label"],
+            "stage_floor": info["stage_floor"],
+            "next_stage_at": info["next_stage_at"],
+            "next_stage_label": info["next_stage_label"],
+            "progress": info["progress"],
             "rank": int(higher) + 1,
             "first_seen_at": int(row["first_seen_at"]),
             "last_interaction_at": int(row["last_interaction_at"]),
@@ -569,15 +599,18 @@ class AffinityStore:
             ).fetchall()
         result = []
         for index, row in enumerate(rows, start=1 + max(0, offset)):
-            stage_key, stage_label = stage_of(float(row["score"]), rules.max_score)
+            info = stage_info(float(row["score"]))
             result.append(
                 {
                     "rank": index,
                     "user_id": row["user_id"],
                     "display_name": row["display_name"],
                     "score": round(float(row["score"]), 1),
-                    "stage": stage_key,
-                    "stage_label": stage_label,
+                    "stage": info["stage"],
+                    "stage_label": info["stage_label"],
+                    "progress": info["progress"],
+                    "next_stage_at": info["next_stage_at"],
+                    "next_stage_label": info["next_stage_label"],
                     "last_interaction_at": int(row["last_interaction_at"]),
                 }
             )
@@ -723,13 +756,13 @@ class AffinityStore:
                 rows = [
                     row
                     for row in rows
-                    if stage_of(float(row["score"]), rules.max_score)[0] == stage
+                    if stage_of(float(row["score"]))[0] == stage
                 ]
             total = len(rows)
             picked = rows[(page - 1) * size: page * size]
         items = []
         for index, row in enumerate(picked, start=(page - 1) * size + 1):
-            key, label = stage_of(float(row["score"]), rules.max_score)
+            info = stage_info(float(row["score"]))
             items.append(
                 {
                     "rank": index,
@@ -737,8 +770,11 @@ class AffinityStore:
                     "display_name": row["display_name"],
                     "platform": row["platform"],
                     "score": round(float(row["score"]), 1),
-                    "stage": key,
-                    "stage_label": label,
+                    "stage": info["stage"],
+                    "stage_label": info["stage_label"],
+                    "progress": info["progress"],
+                    "next_stage_at": info["next_stage_at"],
+                    "next_stage_label": info["next_stage_label"],
                     "first_seen_at": int(row["first_seen_at"]),
                     "last_interaction_at": int(row["last_interaction_at"]),
                 }
@@ -759,7 +795,7 @@ class AffinityStore:
                 count = sum(
                     1
                     for row in rows
-                    if stage_of(float(row["score"]), rules.max_score)[0] == key
+                    if stage_of(float(row["score"]))[0] == key
                 )
                 stages.append({"key": key, "label": label, "count": count, "edge": edge})
             total_users = len(rows)
@@ -801,7 +837,7 @@ class AffinityStore:
         return {
             "role_id": role_id,
             "days": days,
-            "max_score": rules.max_score,
+            "top_stage_at": TOP_STAGE_AT,
             "totals": {
                 "users": total_users,
                 "avg_score": avg,
@@ -924,14 +960,17 @@ class AffinityStore:
             ).fetchall()
         items = []
         for row in rows:
-            key, label = stage_of(float(row["score"] or 0), rules.max_score)
+            info = stage_info(float(row["score"] or 0))
             items.append(
                 {
                     "user_id": row["user_id"],
                     "display_name": row["display_name"] or "",
                     "score": round(float(row["score"] or 0), 1),
-                    "stage": key,
-                    "stage_label": label,
+                    "stage": info["stage"],
+                    "stage_label": info["stage_label"],
+                    "progress": info["progress"],
+                    "next_stage_at": info["next_stage_at"],
+                    "next_stage_label": info["next_stage_label"],
                     "last_interaction_at": int(row["last_interaction_at"] or 0),
                     "group_delta": round(float(row["delta"] or 0), 1),
                     "events": int(row["events"]),

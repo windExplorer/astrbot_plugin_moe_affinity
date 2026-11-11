@@ -126,7 +126,7 @@ const moodRadar = computed(() => {
   };
 });
 
-const maxScore = computed(() => data.value?.max_score || 1000);
+const topStageAt = computed(() => data.value?.top_stage_at || 2000);
 </script>
 
 <template>
@@ -156,7 +156,7 @@ const maxScore = computed(() => data.value?.max_score || 1000);
     <div class="stat">
       <span class="k">平均分</span>
       <span class="v mono">{{ data?.totals.avg_score ?? 0 }}</span>
-      <span class="s">上限 {{ maxScore }}</span>
+      <span class="s">无上限 · 亲密 1000 / 羁绊 2000</span>
     </div>
     <div class="stat">
       <span class="k">今日事件</span>
@@ -218,7 +218,7 @@ const maxScore = computed(() => data.value?.max_score || 1000);
             <span class="n">{{ item.display_name || item.user_id }}</span>
           </div>
           <div class="bar" style="width: 120px">
-            <i :style="{ width: Math.min(100, (item.score / maxScore) * 100) + '%' }"></i>
+            <i :style="{ width: Math.min(100, (item.score / topStageAt) * 100) + '%' }"></i>
           </div>
           <span class="mono" style="width: 48px; text-align: right">{{ item.score }}</span>
         </div>

@@ -465,7 +465,7 @@ async def h_migrate_preview(plugin) -> dict:
                 "message": f"读取失败：{exc}（若它用的是 MySQL 而不是 SQLite，则不支持自动迁移）",
             }
         )
-    plan = migrate_self_learning.build_plan(legacy, plugin._rules().max_score)
+    plan = migrate_self_learning.build_plan(legacy)
     imported = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
     for item in plan:
         item["imported"] = item["user_id"] in imported
@@ -493,7 +493,7 @@ async def h_migrate_apply(plugin) -> dict:
         legacy = migrate_self_learning.read_legacy(path)
     except Exception as exc:
         return err(f"读取老库失败: {exc}")
-    plan = migrate_self_learning.build_plan(legacy, plugin._rules().max_score)
+    plan = migrate_self_learning.build_plan(legacy)
     imported_ids = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
     imported = skipped = 0
     errors: list[str] = []

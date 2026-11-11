@@ -135,7 +135,7 @@ export interface OverviewData {
   role_id: string;
   role_name?: string;
   days: number;
-  max_score: number;
+  top_stage_at: number;
   totals: {
     users: number;
     avg_score: number;
@@ -158,6 +158,9 @@ export interface UserRow {
   score: number;
   stage: string;
   stage_label: string;
+  progress: number;
+  next_stage_at: number | null;
+  next_stage_label: string;
   first_seen_at: number;
   last_interaction_at: number;
 }
@@ -173,7 +176,7 @@ export interface UsersPage {
 export interface UserDetail {
   status: string;
   role_id: string;
-  snapshot?: UserRow & { peak: number; max_score: number; revision: number };
+  snapshot?: UserRow & { peak: number; revision: number; stage_floor: number };
   series?: { day: string; delta: number; events: number }[];
   groups?: { group_id: string; group_name: string; delta: number; events: number; last_at: number }[];
   events?: {
@@ -225,6 +228,9 @@ export interface RankRow {
   score: number;
   stage: string;
   stage_label: string;
+  progress: number;
+  next_stage_at: number | null;
+  next_stage_label: string;
   last_interaction_at: number;
 }
 

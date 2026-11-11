@@ -189,7 +189,6 @@ class MoeAffinityPlugin(Star):
     def _rules(self) -> store.Rules:
         cfg = self._section("affinity")
         return store.Rules(
-            max_score=int(cfg.get("max_score", 1000) or 1000),
             daily_gain_cap=int(cfg.get("daily_gain_cap", 30) or 30),
             daily_loss_cap=int(cfg.get("daily_loss_cap", 20) or 20),
             decay_enabled=bool(cfg.get("decay_enabled", True)),
@@ -316,17 +315,15 @@ class MoeAffinityPlugin(Star):
         days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
         gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
         gap_to_next = ""
-        max_score = max(1, int(snapshot["max_score"]))
-        ratio = float(snapshot["score"]) / max_score
-        for edge, _key, label in reversed(store.STAGE_TABLE):
-            if edge > ratio:
-                need = int(round(edge * max_score - float(snapshot["score"])))
-                if need > 0:
-                    gap_to_next = f"（距{label}还差 {need}）"
-                break
+        next_at = snapshot.get("next_stage_at")
+        next_label = snapshot.get("next_stage_label") or ""
+        if next_at and next_label:
+            need = max(0, int(round(float(next_at) - float(snapshot["score"]))))
+            if need > 0:
+                gap_to_next = f"（距{next_label}还差 {need}）"
         return (
             f"{title}\n"
-            f"{int(snapshot['score'])}/{snapshot['max_score']} · {snapshot['stage_label']}{gap_to_next}\n"
+            f"{int(snapshot['score'])} 分 · {snapshot['stage_label']}{gap_to_next}\n"
             f"本角色第 {snapshot['rank']} 名\n"
             f"认识 {days} 天 · 最近互动 {gap}"
         )
@@ -425,7 +422,7 @@ class MoeAffinityPlugin(Star):
         gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
         head = f"关系：{snapshot['stage_label']}"
         if cfg.get("show_score", True):
-            head += f"（{int(snapshot['score'])}/{snapshot['max_score']}）"
+            head += f"（{int(snapshot['score'])} 分）"
         body = f"{head}，认识 {days} 天，最近互动在{gap}。"
         if mood_view and not mood_view.get("neutral"):
             body += f"心情：{mood_view.get('description', '')}。"
