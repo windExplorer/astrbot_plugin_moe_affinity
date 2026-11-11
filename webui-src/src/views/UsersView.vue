@@ -179,7 +179,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           </td>
           <td>
             <div class="row">
-              <div class="bar" style="width: 110px">
+              <div class="bar" style="width: 190px">
                 <i :style="{ width: Math.min(100, row.overall_progress * 100) + '%' }"></i>
               </div>
               <span class="mono">{{ row.score }}</span>
