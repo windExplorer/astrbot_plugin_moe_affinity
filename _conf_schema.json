@@ -188,7 +188,7 @@
   "checkin_sync": {
     "type": "object",
     "description": "签到好感同步（画境拾珍）",
-    "hint": "只读 astrbot_plugin_get_px 的 checkin.sqlite3，把每日签到好感折成用户级签到分：不挂角色（任何人格的注入都能看到同一份）、不翻倍、不占每日上限。",
+    "hint": "只读 astrbot_plugin_get_px 的 checkin.sqlite3，把每日签到好感并入主分数：写到该用户有记录的每个角色各一份（不翻倍看单段关系），不占每日上限。",
     "items": {
       "enabled": {
         "type": "bool",

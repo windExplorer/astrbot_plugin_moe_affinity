@@ -1,11 +1,14 @@
 """从签到插件（astrbot_plugin_get_px，画境拾珍）单向同步签到好感。
 
-只读它的 ``checkin.sqlite3``，不改它的任何数据。口径见 docs/设计说明.md：
+只读它的 ``checkin.sqlite3``，不改它的任何数据。口径见 docs/设计说明.md（v0.12.1 起）：
 
-- 签到好感是「用户 × bot 整体」粒度，**不挂角色**：事件以 ``role_id=""`` 落流水，
-  聚合出用户级签到亲密度，任何角色的注入都能看到同一份，也不会翻倍；
+- 签到分**并入主分数**：每条签到记录写到该用户**有记录的每个角色**各一份
+  （用户明确选择：私聊角色 A、群聊角色 B 都能感受到签到情分）；
 - ``delta = 对方当日 affection_reward × 系数``（连签/双倍卡语义原样保留，evidence 留档）；
-- ``dedupe_key = checkin:{user}:{date}``：签到一天最多一次，天然幂等，重扫绝不重复加分；
+- ``dedupe_key = checkin:{role}:{user}:{date}``：签到一天最多一次，天然幂等，
+  重扫/重导入绝不重复加分；走 ``store.apply_event`` 落库（主分数/档位/榜单直接可见，
+  事件时间用签到记录的真实时间，不刷新成同步时刻）；
+- 没有任何角色记录的用户先不入账（等聊过天之后的下一次「导入全部历史」会补齐）；
 - 顺带把 ``checkin_users.created_at``（首次签到建档时间）回填为认识时间（只提前、不推后）。
 
 同步时机有三条，共用同一套幂等键：
@@ -13,9 +16,9 @@
 1. 后台循环每小时扫「昨天 + 今天」（``sync_recent``）；
 2. 控制台手动「立即同步 / 导入全部历史」（``sync_recent`` / ``sync_full``）；
 3. 用户用 /好感度 查询时按需补一次（``ensure_user_fresh``，带防重读：
-   今天的事件已在库里就完全不碰对方库；60 秒内读过也跳过）。
+   该用户今天的事件已在库里就完全不碰对方库；60 秒内读过也跳过）。
 
-本模块只依赖标准库，调用方传入 store（鸭子类型），便于纯函数自检。
+本模块只依赖标准库，调用方传入 store 与 rules（鸭子类型），便于纯函数自检。
 """
 
 from __future__ import annotations
@@ -38,8 +41,9 @@ THROTTLE_SECONDS = 60
 _USER_CHECK_AT: dict[str, float] = {}
 
 
-def dedupe_key(user_id: str, date_key: str) -> str:
-    return f"{DEDUPE_PREFIX}{user_id}:{date_key}"
+def dedupe_key(role_id: str, user_id: str, date_key: str) -> str:
+    """幂等键带角色：同一份记录按角色各落一份、各自只落一次。"""
+    return f"{DEDUPE_PREFIX}{role_id}:{user_id}:{date_key}"
 
 
 # ------------------------------------------------------------------ 时间
@@ -55,6 +59,11 @@ def _now_shanghai() -> datetime:
 
 def today_key() -> str:
     return _now_shanghai().date().isoformat()
+
+
+def today_start_epoch() -> int:
+    """今天（上海时区）零点的秒级时间戳，用于「今天是否已同步过」的存在性检查。"""
+    return int(_now_shanghai().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 
 def since_key(days: int = 2) -> str:
@@ -178,7 +187,7 @@ def describe(db_path: Path | None) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ 事件构建与写入
 def build_event(row: dict[str, Any], scale: float) -> dict[str, Any] | None:
-    """一条签到记录 → 一条用户级事件。delta 为 0 的记录不值得落流水。"""
+    """一条签到记录 → 一条待落库事件（写入时会按角色展开）。delta 为 0 的记录跳过。"""
     uid = str(row.get("user_id") or "").strip()
     date_key = str(row.get("date_key") or "").strip()
     if not uid or not date_key:
@@ -188,7 +197,7 @@ def build_event(row: dict[str, Any], scale: float) -> dict[str, Any] | None:
         return None
     return {
         "user_id": uid,
-        "dedupe_key": dedupe_key(uid, date_key),
+        "date_key": date_key,
         "delta": delta,
         "created_at": parse_ts(str(row.get("created_at") or "")),
         "evidence": json.dumps(
@@ -215,39 +224,57 @@ def streak_from_evidence(text: str) -> int:
         return 0
 
 
-def _sync_rows(store, rows: list[dict[str, Any]], *, scale: float, profiles: dict[str, int]) -> dict[str, int]:
+def _sync_rows(store, rows: list[dict[str, Any]], *, scale: float, rules, profiles: dict[str, int]) -> dict[str, int]:
+    """把签到记录写进「该用户有记录的每个角色」，返回落库统计。"""
     events = [e for e in (build_event(row, scale) for row in rows) if e is not None]
-    written = store.record_user_events(source=SOURCE, code=CODE, rows=events) if events else 0
+    written = 0
+    if events:
+        roles = store.roles_of_users([e["user_id"] for e in events])
+        for event in events:
+            for role_id in roles.get(event["user_id"], []):
+                snapshot = store.apply_event(
+                    role_id=role_id,
+                    user_id=event["user_id"],
+                    code=CODE,
+                    delta=event["delta"],
+                    source=SOURCE,
+                    rules=rules,
+                    evidence=event["evidence"],
+                    dedupe_key=dedupe_key(role_id, event["user_id"], event["date_key"]),
+                    now=event["created_at"] or None,  # 用签到真实时间，衰减结算链保持正确
+                )
+                if snapshot.get("status") == "ok" and float(snapshot.get("applied") or 0) != 0:
+                    written += 1
     # 首次签到建档时间也是「第一次见面」的证据：回填认识时间（只提前、不推后）
     mapping = {uid: ts for uid, ts in profiles.items() if ts > 0}
     repaired = store.repair_first_seen_all(mapping) if mapping else 0
     return {"records": len(rows), "written": written, "first_seen_repaired": repaired}
 
 
-def sync_recent(store, db_path: Path, *, scale: float = 1.0, days: int = 2) -> dict[str, int]:
+def sync_recent(store, db_path: Path, *, scale: float = 1.0, rules=None, days: int = 2) -> dict[str, int]:
     """增量同步最近 N 天（后台循环用，幂等）。"""
     rows = read_records(db_path, since_date=since_key(days))
     profiles = read_profile_created(db_path, [str(r["user_id"]) for r in rows])
-    return _sync_rows(store, rows, scale=scale, profiles=profiles)
+    return _sync_rows(store, rows, scale=scale, rules=rules, profiles=profiles)
 
 
-def sync_full(store, db_path: Path, *, scale: float = 1.0) -> dict[str, int]:
+def sync_full(store, db_path: Path, *, scale: float = 1.0, rules=None) -> dict[str, int]:
     """全量导入历史（控制台按钮用，幂等：已导入过的被唯一索引吞掉）。"""
     rows = read_records(db_path)
     profiles = read_profile_created(db_path, [str(r["user_id"]) for r in rows])
-    return _sync_rows(store, rows, scale=scale, profiles=profiles)
+    return _sync_rows(store, rows, scale=scale, rules=rules, profiles=profiles)
 
 
-def ensure_user_fresh(store, db_path: Path | None, user_id: str, *, scale: float = 1.0) -> dict[str, Any]:
+def ensure_user_fresh(store, db_path: Path | None, user_id: str, *, scale: float = 1.0, rules=None) -> dict[str, Any]:
     """指令触发的按需同步：只看这一个用户，带两层防重读。
 
-    1) 今天的事件已经在库里 → 直接返回 ``fresh``，完全不碰对方库；
+    1) 该用户今天的事件已经在库里 → 直接返回 ``fresh``，完全不碰对方库；
     2) 60 秒内刚读过 → 返回 ``throttled``（连点 /好感度 不会反复开对方的数据库）。
     """
     uid = str(user_id or "").strip()
     if not uid or db_path is None:
         return {"status": "unavailable"}
-    if store.has_user_source_event(source=SOURCE, dedupe_key=dedupe_key(uid, today_key())):
+    if store.has_user_source_since(source=SOURCE, user_id=uid, since=today_start_epoch()):
         return {"status": "fresh"}
     now = time.time()
     if now - _USER_CHECK_AT.get(uid, 0.0) < THROTTLE_SECONDS:
@@ -255,6 +282,6 @@ def ensure_user_fresh(store, db_path: Path | None, user_id: str, *, scale: float
     _USER_CHECK_AT[uid] = now
     rows = read_records(db_path, user_id=uid, since_date=since_key(2))
     profiles = read_profile_created(db_path, [uid])
-    stats = _sync_rows(store, rows, scale=scale, profiles=profiles)
+    stats = _sync_rows(store, rows, scale=scale, rules=rules, profiles=profiles)
     stats["status"] = "ok"
     return stats

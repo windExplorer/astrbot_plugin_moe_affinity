@@ -195,16 +195,17 @@ onMounted(load);
     <div class="muted">
       <template v-if="checkin?.exists">
         已找到对方库（{{ checkin.users }} 人 / {{ checkin.records }} 条签到记录<template v-if="checkin.first_date">，{{ checkin.first_date }} 起</template>）
-        · 已导入 {{ checkin.imported?.events ?? 0 }} 条、覆盖 {{ checkin.imported?.users ?? 0 }} 人
+        · 已导入 {{ checkin.imported?.events ?? 0 }} 条（按角色展开）、覆盖 {{ checkin.imported?.users ?? 0 }} 人
         <span v-if="checkin.imported?.last_at" class="faint">· 最近一次 {{ timeAgo(checkin.imported.last_at) }}</span>
         <span class="faint">· 系数 ×{{ checkin.scale }}</span>
       </template>
       <template v-else>没找到画境拾珍的 checkin.sqlite3 —— 未安装时忽略本卡片即可。</template>
     </div>
     <div class="faint" style="margin-top: 6px">
-      签到好感是「用户 × bot」粒度，不挂角色：任何人格的注入看到的都是同一份，不会翻倍，也不占每日上限。
+      签到分<b>并入主分数</b>：每条签到记录写到该用户有记录的每个角色各一份（私聊角色 A、群聊角色 B 都能感受到签到情分），
+      档位/榜单/进度条直接可见，不占每日上限；下方「签到」列与用户详情的签到卡显示的是各角色合计。
       每小时自动同步「昨天+今天」；用户用 /好感度 查询时会顺手补一次（防重读）。
-      「导入全部历史」会把对方的所有签到记录一次性折算进来，重复点击是安全的。
+      「导入全部历史」把对方所有签到记录按当前角色关系折算进来，重复点击是安全的。
     </div>
   </div>
 

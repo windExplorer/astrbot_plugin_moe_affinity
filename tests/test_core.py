@@ -662,58 +662,80 @@ def test_checkin_sync():
             conn.close()
 
         db = store.AffinityStore(tmp / "a.db")
-        stats = cs.sync_full(db, db_path, scale=2.0)
-        check("全量导入 3 条", stats["written"] == 3, str(stats))
-        summaries = db.user_source_summaries(source=cs.SOURCE, user_ids=["u1", "u2"])
-        check("系数 ×2 后 u1 = 3.8", abs(summaries["u1"]["score"] - 3.8) < 1e-6, str(summaries))
-        check("u1 两天", summaries["u1"]["days"] == 2, str(summaries))
-        check("u2 = 1.0", abs(summaries["u2"]["score"] - 1.0) < 1e-6, str(summaries))
+        rules = store.Rules()
+        role_a = db.ensure_role("pa")
+        role_b = db.ensure_role("pb")
+        first = int(datetime.fromisoformat("2026-01-01T09:00:00+08:00").timestamp())
+        # u1 与两个角色都有关系（私聊 A / 群聊 B），u2 只聊过 A
+        base = first + 86400
+        db.apply_event(role_id=role_a, user_id="u1", code="chat.message", delta=5,
+                       rules=rules, now=base)
+        db.apply_event(role_id=role_b, user_id="u1", code="chat.message", delta=5,
+                       rules=rules, now=base)
+        db.apply_event(role_id=role_a, user_id="u2", code="chat.message", delta=5,
+                       rules=rules, now=base)
 
-        repeat = cs.sync_full(db, db_path, scale=2.0)
-        check("重复导入不加分", repeat["written"] == 0, str(repeat))
+        stats = cs.sync_full(db, db_path, scale=2.0, rules=rules)
+        # u1: 2 条记录 × 2 角色 = 4，u2: 1 × 1 = 1
+        check("按角色展开写入 5 条", stats["written"] == 5, str(stats))
+        snap_a = db.snapshot(role_a, "u1", rules, now=base + 60)
+        snap_b = db.snapshot(role_b, "u1", rules, now=base + 60)
+        check("角色 A 主分含签到 (5+3.8)", abs(snap_a["score"] - 8.8) < 1e-6, str(snap_a))
+        check("角色 B 也有一份", abs(snap_b["score"] - 8.8) < 1e-6, str(snap_b))
+        snap_u2 = db.snapshot(role_a, "u2", rules, now=base + 60)
+        check("只在与 TA 有关系的角色记分 (5+1)", abs(snap_u2["score"] - 6.0) < 1e-6, str(snap_u2))
+        check("认识时间回填到首次签到", snap_a["first_seen_at"] == first, str(snap_a["first_seen_at"]))
 
+        repeat = cs.sync_full(db, db_path, scale=2.0, rules=rules)
+        check("重复导入幂等", repeat["written"] == 0, str(repeat))
+        again = db.snapshot(role_a, "u1", rules, now=base + 120)
+        check("重复导入后主分不变", abs(again["score"] - 8.8) < 1e-6, str(again))
+
+        # 签到卡合计 = 各角色合计（两份）
+        s1 = db.user_source_summaries(source=cs.SOURCE, user_ids=["u1"])["u1"]
+        check("签到卡合计 7.6（两份）", abs(s1["score"] - 7.6) < 1e-6, str(s1))
         last = db.user_source_last(source=cs.SOURCE, user_id="u1")
-        check(
-            "审计快照连续 (1.6 -> 3.8)",
-            last is not None and abs(last["after"] - 3.8) < 1e-6 and abs(last["before"] - 1.6) < 1e-6,
-            str(last),
-        )
         check("连签天数在 evidence 里", cs.streak_from_evidence(last["evidence"]) == 2, str(last))
 
-        # 首次签到建档时间 → 认识时间回填（只提前不推后）
-        rules = store.Rules()
-        role = db.ensure_role("p1")
-        db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=5,
-                       rules=rules, now=2000000000)
-        cs.sync_full(db, db_path, scale=2.0)
-        first_seen = int(datetime.fromisoformat("2026-01-01T09:00:00+08:00").timestamp())
-        seen = db.snapshot(role, "u1", rules, now=2000000000)
-        check("认识时间回填到首次签到", seen["first_seen_at"] == first_seen, str(seen["first_seen_at"]))
-
         # 按需同步：执行 -> 节流 -> 今天已有事件则完全不读
-        res = cs.ensure_user_fresh(db, db_path, "u2")
+        res = cs.ensure_user_fresh(db, db_path, "u2", rules=rules)
         check("按需同步执行", res["status"] == "ok", str(res))
-        check("60 秒内节流", cs.ensure_user_fresh(db, db_path, "u2")["status"] == "throttled")
+        check("60 秒内节流",
+              cs.ensure_user_fresh(db, db_path, "u2", rules=rules)["status"] == "throttled")
 
         conn = sqlite3.connect(db_path)
         try:
             today = cs.today_key()
             conn.execute(
                 "INSERT OR REPLACE INTO checkin_records VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (today, "u2", "小红", 0.6, 0.0, 0.6, 0, 1.0, 2,
+                (today, "u1", "小明", 0.6, 0.0, 0.6, 0, 1.0, 3,
                  f"{today}T09:00:00+08:00", f"{today}T09:00:00+08:00"),
             )
             conn.commit()
         finally:
             conn.close()
         cs._USER_CHECK_AT.clear()
-        got = cs.ensure_user_fresh(db, db_path, "u2")
-        check("当天记录可按需同步", got["status"] == "ok" and got["written"] == 1, str(got))
+        got = cs.ensure_user_fresh(db, db_path, "u1", rules=rules)
+        check("当天记录按需同步（两角色各一份）", got["status"] == "ok" and got["written"] == 2, str(got))
         cs._USER_CHECK_AT.clear()
-        check("今天已有事件不再读库", cs.ensure_user_fresh(db, db_path, "u2")["status"] == "fresh")
+        check("今天已有事件不再读库",
+              cs.ensure_user_fresh(db, db_path, "u1", rules=rules)["status"] == "fresh")
 
-        total = db.user_source_total(source=cs.SOURCE)
-        check("全局概况 4 条 / 2 人", total["events"] == 4 and total["users"] == 2, str(total))
+        # 升级清理：v0.12.0 的无角色签到事件在重新打开建库时被清掉
+        before = db.user_source_total(source=cs.SOURCE)["users"]
+        conn = sqlite3.connect(db.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO events(role_id, user_id, source, code, delta, before, after,"
+                " dedupe_key, created_at) VALUES('', 'u9', 'checkin', 'checkin.checkin',"
+                " 1.0, 0, 1.0, 'checkin:u9:2026-01-01', 100)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        db2 = store.AffinityStore(db.db_path)  # 重新打开触发迁移
+        after = db2.user_source_total(source=cs.SOURCE)["users"]
+        check("无角色旧事件已被清理", after == before, f"{before} -> {after}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

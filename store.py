@@ -225,6 +225,7 @@ class AffinityStore:
         with self._db() as conn:
             conn.executescript(SCHEMA)
             self._ensure_columns(conn)
+            self._migrate_purge_roleless_checkin(conn)
 
     @staticmethod
     def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -232,6 +233,15 @@ class AffinityStore:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(roles)")}
         if "alias" not in columns:
             conn.execute("ALTER TABLE roles ADD COLUMN alias TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
+    def _migrate_purge_roleless_checkin(conn: sqlite3.Connection) -> None:
+        """v0.12.1：签到事件改为按角色落库，清掉 v0.12.0 的无角色签到事件。
+
+        那批事件只进过「签到卡」展示层、从未计入任何角色分数，删除无损；
+        历史数据由「导入全部历史」重新按角色补齐。
+        """
+        conn.execute("DELETE FROM events WHERE source = 'checkin' AND role_id = ''")
 
     # ------------------------------------------------------------------ 基础
     @contextmanager
@@ -950,69 +960,34 @@ class AffinityStore:
                 )
         return len(mapping)
 
-    # ------------------------------------------------------- 用户级外部流水
-    # 「对 bot 整体」粒度的外部数据（签到插件好感等）：不挂角色、不建 affinities 行、
-    # 不占每日上限，聚合分数读时计算。事件仍在唯一索引 (source, dedupe_key) 上幂等。
+    # ------------------------------------------------------- 外部数据源（签到同步）
+    # 签到等外部好感数据：事件走 apply_event 落到「有记录的每个角色」（主分数直接可见），
+    # 这里只提供角色查询、防重读检查与聚合展示；幂等键 (source, dedupe_key) 唯一索引兜底。
 
-    def record_user_events(self, *, source: str, code: str, rows: list[dict[str, Any]]) -> int:
-        """批量写入用户级事件（幂等），返回实际落库条数。
-
-        ``rows`` 每项需要 ``user_id / dedupe_key / delta / evidence / created_at``；
-        before/after 维护该用户此来源的累计快照（仅审计展示用），重跑时被唯一索引吞掉、
-        快照保持不动。
-        """
-        if not rows:
-            return 0
-        moment = int(time.time())
-        inserted = 0
+    def roles_of_users(self, user_ids: list[str]) -> dict[str, list[str]]:
+        """每个用户当前有哪些角色的好感记录（签到事件按角色展开用）。"""
+        uids = sorted({str(u).strip() for u in user_ids if str(u).strip()})
+        if not uids:
+            return {}
+        placeholders = ",".join("?" for _ in uids)
         with self._db() as conn:
-            running: dict[str, float] = {}
-            uids = sorted({str(row.get("user_id") or "").strip() for row in rows if row.get("user_id")})
-            if uids:
-                placeholders = ",".join("?" for _ in uids)
-                for row in conn.execute(
-                    f"SELECT user_id, COALESCE(SUM(delta), 0) AS s FROM events"
-                    f" WHERE source = ? AND user_id IN ({placeholders}) GROUP BY user_id",
-                    [source, *uids],
-                ):
-                    running[str(row["user_id"])] = float(row["s"])
-            for row in rows:
-                uid = str(row.get("user_id") or "").strip()
-                key = str(row.get("dedupe_key") or "").strip()
-                delta = round(float(row.get("delta") or 0.0), 2)
-                if not uid or not key or delta == 0.0:
-                    continue
-                before = running.get(uid, 0.0)
-                after = round(before + delta, 2)
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO events(role_id, user_id, persona_id, platform,"
-                    " session_id, group_id, is_group, source, code, delta, before, after,"
-                    " evidence, dedupe_key, operator, created_at)"
-                    " VALUES('',?,'','','','',0,?,?,?,?,?,?,?,'sync',?)",
-                    (
-                        uid,
-                        source,
-                        code,
-                        delta,
-                        before,
-                        after,
-                        str(row.get("evidence") or ""),
-                        key,
-                        int(row.get("created_at") or moment),
-                    ),
-                )
-                if cursor.rowcount:
-                    running[uid] = after
-                    inserted += 1
-        return inserted
+            rows = conn.execute(
+                f"SELECT user_id, role_id FROM affinities WHERE user_id IN ({placeholders})",
+                uids,
+            ).fetchall()
+        out: dict[str, list[str]] = {}
+        for row in rows:
+            out.setdefault(str(row["user_id"]), []).append(str(row["role_id"]))
+        return out
 
-    def has_user_source_event(self, *, source: str, dedupe_key: str) -> bool:
-        """某来源 + 幂等键的事件是否已存在（按需同步防重读的第一道闸）。"""
+    def has_user_source_since(self, *, source: str, user_id: str, since: int) -> bool:
+        """某用户在该来源下 since 之后是否已有事件（按需同步防重读的第一道闸）。"""
         with self._db() as conn:
             return (
                 conn.execute(
-                    "SELECT 1 FROM events WHERE source = ? AND dedupe_key = ? LIMIT 1",
-                    (source, dedupe_key),
+                    "SELECT 1 FROM events"
+                    " WHERE source = ? AND user_id = ? AND created_at >= ? LIMIT 1",
+                    (source, str(user_id).strip(), int(since)),
                 ).fetchone()
                 is not None
             )

@@ -262,7 +262,7 @@ function saved() {
       <div class="card-h">
         <div class="card-t">签到</div>
         <div class="spacer"></div>
-        <div class="card-s">来自画境拾珍 · 用户级数据，与角色无关、不占每日上限</div>
+        <div class="card-s">来自画境拾珍 · 已并入主分数（各角色合计口径），不占每日上限</div>
       </div>
       <div v-if="checkin && checkin.days > 0" class="row">
         <span class="pill">亲密度 {{ checkin.score }}</span>

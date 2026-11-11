@@ -691,7 +691,9 @@ async def h_checkin_sync(plugin) -> dict:
         return err("没找到签到插件的 checkin.sqlite3（未安装？或可在配置里手动指定路径）")
     cfg = plugin._checkin_cfg()
     fn = checkin_sync.sync_full if full else checkin_sync.sync_recent
-    stats = await asyncio.to_thread(fn, plugin.store, path, scale=cfg["scale"])
+    stats = await asyncio.to_thread(
+        fn, plugin.store, path, scale=cfg["scale"], rules=plugin._rules()
+    )
     return ok(stats)
 
 

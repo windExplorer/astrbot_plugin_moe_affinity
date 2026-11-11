@@ -316,7 +316,11 @@ class MoeAffinityPlugin(Star):
                     path = self._checkin_db_path()
                     if path is not None:
                         stats = await asyncio.to_thread(
-                            checkin_sync.sync_recent, self.store, path, scale=cfg["scale"]
+                            checkin_sync.sync_recent,
+                            self.store,
+                            path,
+                            scale=cfg["scale"],
+                            rules=self._rules(),
                         )
                         if stats.get("written"):
                             logger.info(f"[moe_affinity] 签到同步 +{stats['written']} 条")
@@ -340,6 +344,7 @@ class MoeAffinityPlugin(Star):
                     path,
                     str(user_id),
                     scale=cfg["scale"],
+                    rules=self._rules(),
                 ),
                 timeout=6,
             )
