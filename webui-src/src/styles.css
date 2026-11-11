@@ -57,9 +57,14 @@ a {
 }
 
 /* ---------------------------------------------------------------- 布局 */
+.n-config-provider {
+  min-height: 100vh;
+  height: 100%;
+}
+
 .app {
   display: flex;
-  min-height: 100%;
+  min-height: 100vh;
 }
 
 .side {

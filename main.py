@@ -143,11 +143,40 @@ class MoeAffinityPlugin(Star):
         )
 
     async def initialize(self) -> None:
-        """注册控制台路由；失败只记日志，不影响插件本体。"""
+        """预建角色、注册控制台路由；失败只记日志，不影响插件本体。"""
+        try:
+            created = self._seed_roles()
+            if created:
+                logger.info(f"[moe_affinity] 启动时预建 {created} 个角色")
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 预建角色失败: {exc}")
         try:
             webui_api.register_apis(self)
         except Exception as exc:
             logger.error(f"[moe_affinity] 控制台路由注册失败: {exc}")
+
+    def _seed_roles(self) -> int:
+        """按当前人格预建角色。
+
+        不预建的话，装机后还没聊过天时角色列表是空的：控制台下拉框「暂无角色」，
+        迁移页也选不到角色（迁移本身要先决定导到哪个角色里）。
+        """
+        created = 0
+        try:
+            manager = getattr(self.context, "persona_manager", None)
+            for persona in getattr(manager, "personas_v3", []) or []:
+                name = str(persona.get("name") or "").strip()
+                if not name:
+                    continue
+                if self.store.role_of_persona(name) is None:
+                    self.store.ensure_role(name, name)
+                    created += 1
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 读取人格列表失败: {exc}")
+        if not self.store.list_roles():
+            self.store.ensure_role("default", "默认人格")
+            created += 1
+        return created
 
     # ------------------------------------------------------------------ 配置
     def _section(self, name: str) -> dict:

@@ -163,6 +163,11 @@ async def h_ping(plugin) -> dict:
 
 async def h_roles(plugin) -> dict:
     roles = plugin.store.list_roles()
+    if not roles:
+        # 兜底：万一 initialize 没跑到（或人格列表为空），至少给一个可选的默认角色，
+        # 否则控制台顶部「暂无角色」，迁移页也选不到导入目标。
+        plugin.store.ensure_role("default", "默认人格")
+        roles = plugin.store.list_roles()
     return ok({"items": roles, "total": len(roles)})
 
 

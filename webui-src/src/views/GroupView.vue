@@ -56,7 +56,7 @@ const trend = computed(() => {
 
 <template>
   <div class="row">
-    <button class="btn ghost" @click="router.push('/groups')">← 返回群列表</button>
+    <n-button size="small" quaternary @click="router.push('/groups')">← 返回群列表</n-button>
     <div class="spacer"></div>
     <span v-if="busy" class="faint">加载中…</span>
   </div>

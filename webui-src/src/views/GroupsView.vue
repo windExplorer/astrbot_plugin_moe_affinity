@@ -45,9 +45,7 @@ watch(() => app.role, load);
       <div class="card-t">群聊贡献</div>
       <div class="spacer"></div>
       <span class="faint">分数是全局一份，这里统计每个群贡献了多少</span>
-      <button class="btn ghost" :disabled="syncing" @click="sync">
-        {{ syncing ? "同步中…" : "同步群名" }}
-      </button>
+      <n-button size="small" quaternary :loading="syncing" @click="sync">同步群名</n-button>
     </div>
 
     <table>

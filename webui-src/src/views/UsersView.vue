@@ -31,6 +31,12 @@ const STAGES = [
   { key: "stranger", label: "陌生" },
 ];
 
+const SORTS = [
+  { label: "按分数", value: "score" },
+  { label: "按最近互动", value: "recent" },
+  { label: "按昵称", value: "name" },
+];
+
 async function load() {
   if (!app.role) return;
   busy.value = true;
@@ -84,31 +90,35 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
 <template>
   <div class="card">
     <div class="row" style="margin-bottom: 12px">
-      <input
-        v-model="keyword"
-        class="input"
-        style="width: 240px"
+      <n-input
+        v-model:value="keyword"
+        style="width: 260px"
+        clearable
         placeholder="搜索昵称或 QQ 号"
       />
-      <button class="btn ghost" @click="submitSearch">搜索</button>
+      <n-button secondary @click="submitSearch">搜索</n-button>
       <div class="spacer"></div>
-      <select class="select" :value="sort" @change="patch({ sort: ($event.target as HTMLSelectElement).value, page: 1 })">
-        <option value="score">按分数</option>
-        <option value="recent">按最近互动</option>
-        <option value="name">按昵称</option>
-      </select>
+      <n-select
+        style="width: 150px"
+        :value="sort"
+        :options="SORTS"
+        @update:value="(value: string) => patch({ sort: value, page: 1 })"
+      />
     </div>
 
     <div class="row" style="margin-bottom: 12px">
-      <button
+      <n-tag
         v-for="item in STAGES"
         :key="item.key"
-        class="chip"
-        :class="{ on: stage === item.key }"
-        @click="patch({ stage: item.key, page: 1 })"
+        :checked="stage === item.key"
+        checkable
+        round
+        :bordered="false"
+        size="small"
+        @update:checked="patch({ stage: item.key, page: 1 })"
       >
         {{ item.label }}
-      </button>
+      </n-tag>
       <div class="spacer"></div>
       <span class="faint">共 {{ total }} 人</span>
     </div>
@@ -144,10 +154,10 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
               <span class="mono">{{ row.score }}</span>
             </div>
           </td>
-          <td><span class="pill">{{ row.stage_label }}</span></td>
+          <td><n-tag size="small" round :bordered="false">{{ row.stage_label }}</n-tag></td>
           <td class="faint">{{ timeAgo(row.last_interaction_at) }}</td>
           <td>
-            <button class="btn ghost" @click.stop="adjustTarget = row">调整</button>
+            <n-button size="small" quaternary @click.stop="adjustTarget = row">调整</n-button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -159,9 +169,9 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
     </table>
 
     <div class="pager" v-if="pages > 1">
-      <button class="btn ghost" :disabled="page <= 1" @click="patch({ page: page - 1 })">上一页</button>
+      <n-button size="small" quaternary :disabled="page <= 1" @click="patch({ page: page - 1 })">上一页</n-button>
       <span class="faint">{{ page }} / {{ pages }}</span>
-      <button class="btn ghost" :disabled="page >= pages" @click="patch({ page: page + 1 })">下一页</button>
+      <n-button size="small" quaternary :disabled="page >= pages" @click="patch({ page: page + 1 })">下一页</n-button>
     </div>
   </div>
 

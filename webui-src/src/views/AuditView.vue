@@ -73,9 +73,9 @@ watch(() => route.query.page, load);
     </table>
 
     <div class="pager" v-if="pages > 1">
-      <button class="btn ghost" :disabled="page <= 1" @click="patch({ page: page - 1 })">上一页</button>
+      <n-button size="small" quaternary :disabled="page <= 1" @click="patch({ page: page - 1 })">上一页</n-button>
       <span class="faint">{{ page }} / {{ pages }}</span>
-      <button class="btn ghost" :disabled="page >= pages" @click="patch({ page: page + 1 })">下一页</button>
+      <n-button size="small" quaternary :disabled="page >= pages" @click="patch({ page: page + 1 })">下一页</n-button>
     </div>
   </div>
 </template>

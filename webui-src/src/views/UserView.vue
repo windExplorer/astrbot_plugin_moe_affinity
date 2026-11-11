@@ -88,7 +88,7 @@ function saved() {
 
 <template>
   <div class="row">
-    <button class="btn ghost" @click="back">← 返回用户列表</button>
+    <n-button size="small" quaternary @click="back">← 返回用户列表</n-button>
     <div class="spacer"></div>
     <span v-if="busy" class="faint">加载中…</span>
   </div>
@@ -109,7 +109,7 @@ function saved() {
           <div class="faint">{{ snap.user_id }}<span v-if="snap.platform"> · {{ snap.platform }}</span></div>
         </div>
         <div class="row">
-          <button class="btn" @click="editing = true">调整分数</button>
+          <n-button size="small" type="primary" secondary @click="editing = true">调整分数</n-button>
         </div>
       </div>
 

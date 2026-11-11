@@ -30,15 +30,18 @@ const maxScore = 1000;
 
 <template>
   <div class="row">
-    <button
+    <n-tag
       v-for="value in [10, 20, 50, 100]"
       :key="value"
-      class="chip"
-      :class="{ on: limit === value }"
-      @click="limit = value"
+      :checked="limit === value"
+      checkable
+      round
+      :bordered="false"
+      size="small"
+      @update:checked="limit = value"
     >
       前 {{ value }}
-    </button>
+    </n-tag>
     <div class="spacer"></div>
     <span class="faint">{{ busy ? "加载中…" : `共 ${rows.length} 人` }}</span>
   </div>

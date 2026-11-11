@@ -131,15 +131,18 @@ const maxScore = computed(() => data.value?.max_score || 1000);
 
 <template>
   <div class="row">
-    <button
+    <n-tag
       v-for="value in [7, 30, 90]"
       :key="value"
-      class="chip"
-      :class="{ on: days === value }"
-      @click="setDays(value)"
+      :checked="days === value"
+      checkable
+      round
+      :bordered="false"
+      size="small"
+      @update:checked="setDays(value)"
     >
       近 {{ value }} 天
-    </button>
+    </n-tag>
     <div class="spacer"></div>
     <span v-if="busy" class="faint">加载中…</span>
   </div>

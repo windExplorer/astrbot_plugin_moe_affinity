@@ -3,9 +3,24 @@
 
 import { reactive } from "vue";
 import { apiPing, apiRoles, type RoleRow } from "./api";
-import { storageGet, storageSet } from "./bridge";
+import { getContext, storageGet, storageSet } from "./bridge";
 
 const ROLE_KEY = "moe.affinity.role";
+
+/** 深色/浅色跟随宿主面板；拿不到就跟随系统。Naive UI 主题靠它切换。 */
+export const isDark = (() => {
+  try {
+    const ctx = getContext();
+    if (ctx && typeof ctx.isDark === "boolean") return ctx.isDark;
+  } catch {
+    /* ignore */
+  }
+  try {
+    return !window.matchMedia("(prefers-color-scheme: light)").matches;
+  } catch {
+    return true;
+  }
+})();
 
 export const app = reactive({
   ready: false,

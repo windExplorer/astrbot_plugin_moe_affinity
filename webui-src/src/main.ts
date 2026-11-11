@@ -1,5 +1,27 @@
 import { createApp } from "vue";
 import { createRouter, createWebHashHistory } from "vue-router";
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NCheckbox,
+  NConfigProvider,
+  NDivider,
+  NDynamicTags,
+  NEmpty,
+  NInput,
+  NInputNumber,
+  NModal,
+  NPopconfirm,
+  NRadio,
+  NRadioButton,
+  NRadioGroup,
+  NSelect,
+  NSpin,
+  NSwitch,
+  NTag,
+  NTooltip,
+} from "naive-ui";
 import App from "./App.vue";
 import "./styles.css";
 import { bootstrap } from "./state";
@@ -39,4 +61,33 @@ router.beforeEach(async () => {
   await bootstrap();
 });
 
-createApp(App).use(router).mount("#app");
+const application = createApp(App).use(router);
+
+// 全局注册用到的 Naive UI 组件（模板里写 kebab-case 即可，Vue 会自动匹配 PascalCase）
+const components = {
+  NAlert,
+  NButton,
+  NCard,
+  NCheckbox,
+  NConfigProvider,
+  NDivider,
+  NDynamicTags,
+  NEmpty,
+  NInput,
+  NInputNumber,
+  NModal,
+  NPopconfirm,
+  NRadio,
+  NRadioButton,
+  NRadioGroup,
+  NSelect,
+  NSpin,
+  NSwitch,
+  NTag,
+  NTooltip,
+};
+for (const [name, component] of Object.entries(components)) {
+  application.component(name, component);
+}
+
+application.mount("#app");
