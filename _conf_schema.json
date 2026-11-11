@@ -185,6 +185,43 @@
       }
     }
   },
+  "checkin_sync": {
+    "type": "object",
+    "description": "签到好感同步（画境拾珍）",
+    "hint": "只读 astrbot_plugin_get_px 的 checkin.sqlite3，把每日签到好感折成用户级签到分：不挂角色（任何人格的注入都能看到同一份）、不翻倍、不占每日上限。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用签到同步",
+        "hint": "对方插件未安装时同步静默待机，不影响本插件其它功能。",
+        "default": true
+      },
+      "interval_minutes": {
+        "type": "int",
+        "description": "自动同步间隔（分钟）",
+        "hint": "每小时扫一次「昨天+今天」；用户查询 /好感度 时也会按需补一次（带防重读）。",
+        "default": 60
+      },
+      "scale": {
+        "type": "float",
+        "description": "分数系数",
+        "hint": "签到事件按对方当日好感增量 × 此系数入库，默认 1:1。想放大签到权重可调（如 3）。",
+        "default": 1.0
+      },
+      "inject": {
+        "type": "bool",
+        "description": "注入时附带签到信息",
+        "hint": "在好感度注入块里追加一句「签到累计 N 天（亲密度 X）」。",
+        "default": true
+      },
+      "db_path": {
+        "type": "string",
+        "description": "对方数据库路径（留空自动定位）",
+        "hint": "默认 data/plugin_data/astrbot_plugin_get_px/checkin.sqlite3，仅对方装在非默认位置时需要填。",
+        "default": ""
+      }
+    }
+  },
   "advanced": {
     "type": "object",
     "description": "高级",

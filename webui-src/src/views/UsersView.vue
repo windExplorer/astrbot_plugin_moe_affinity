@@ -160,6 +160,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           <th style="width: 200px">分数</th>
           <th style="width: 90px">档位</th>
           <th style="width: 88px">认识</th>
+          <th style="width: 84px">签到</th>
           <th style="width: 110px">最近互动</th>
           <th style="width: 96px"></th>
         </tr>
@@ -186,13 +187,16 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           </td>
           <td><n-tag size="small" round :bordered="false">{{ row.stage_label }}</n-tag></td>
           <td class="faint mono">{{ daysSince(row.first_seen_at) }} 天</td>
+          <td class="faint mono" :title="`累计 ${row.checkin_days ?? 0} 天`">
+            {{ row.checkin_days ? row.checkin_score : "—" }}
+          </td>
           <td class="faint">{{ timeAgo(row.last_interaction_at) }}</td>
           <td>
             <n-button size="small" quaternary @click.stop="adjustTarget = row">调整</n-button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td colspan="7">
+          <td colspan="8">
             <div class="empty">{{ busy ? "加载中…" : "没有匹配的用户" }}</div>
           </td>
         </tr>

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ try:  # quart 是 AstrBot 的运行期依赖
 except Exception:  # pragma: no cover - 仅本地静态检查时缺失
     request = None  # type: ignore
 
-from . import migrate_self_learning, rules_info, store
+from . import checkin_sync, migrate_self_learning, rules_info, store
 
 ROUTE_PREFIX = "/astrbot_plugin_moe_affinity"
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -245,6 +246,16 @@ async def h_users(plugin) -> dict:
     )
     data["role_id"] = role
     data["missing_names"] = len(plugin.store.users_without_name(1000))
+    # 用户级签到分（来自签到插件同步，与角色无关）：列表直接带出来，一屏看全
+    rows = data.get("rows") or []
+    if rows:
+        summaries = plugin.store.user_source_summaries(
+            source=checkin_sync.SOURCE, user_ids=[r["user_id"] for r in rows]
+        )
+        for row in rows:
+            summary = summaries.get(row["user_id"]) or {}
+            row["checkin_score"] = summary.get("score", 0.0)
+            row["checkin_days"] = summary.get("days", 0)
     return ok(data)
 
 
@@ -257,6 +268,7 @@ async def h_user(plugin) -> dict:
         role, user_id, plugin._rules(), days=_qi("days", 30, 1, 180)
     )
     data["role_id"] = role
+    data["checkin"] = await plugin._checkin_view(user_id)
     return ok(data)
 
 
@@ -660,6 +672,29 @@ async def h_set_first_seen(plugin) -> dict:
     return ok({"role_id": role, "user_id": user_id, "first_seen_at": stamp})
 
 
+async def h_checkin_status(plugin) -> dict:
+    """签到同步状态卡：对方库概况 + 本插件已导入量。"""
+    cfg = plugin._checkin_cfg()
+    info = checkin_sync.describe(plugin._checkin_db_path())
+    info["enabled"] = cfg["enabled"]
+    info["scale"] = cfg["scale"]
+    info["imported"] = plugin.store.user_source_total(source=checkin_sync.SOURCE)
+    return ok(info)
+
+
+async def h_checkin_sync(plugin) -> dict:
+    """手动触发签到同步：full=True 导入全部历史，否则只同步最近两天（幂等）。"""
+    body = await _payload()
+    full = bool(body.get("full"))
+    path = plugin._checkin_db_path()
+    if path is None:
+        return err("没找到签到插件的 checkin.sqlite3（未安装？或可在配置里手动指定路径）")
+    cfg = plugin._checkin_cfg()
+    fn = checkin_sync.sync_full if full else checkin_sync.sync_recent
+    stats = await asyncio.to_thread(fn, plugin.store, path, scale=cfg["scale"])
+    return ok(stats)
+
+
 def _aiocqhttp_platforms(plugin) -> list:
     try:
         insts = plugin.context.platform_manager.platform_insts
@@ -950,6 +985,8 @@ def register_apis(plugin) -> None:
         ("/groups", h_groups, ["GET"]),
         ("/group", h_group, ["GET"]),
         ("/sync", h_sync, ["POST"]),
+        ("/checkin/status", h_checkin_status, ["GET"]),
+        ("/checkin/sync", h_checkin_sync, ["POST"]),
         ("/avatars", h_avatars, ["GET"]),
         ("/rank", h_rank, ["GET"]),
         ("/audit", h_audit, ["GET"]),

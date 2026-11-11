@@ -20,7 +20,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import migrate_self_learning, mood, personas, rules_info, scoring, store, webui_api
+from . import checkin_sync, migrate_self_learning, mood, personas, rules_info, scoring, store, webui_api
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 API_VERSION = "affinity.v1"
@@ -46,7 +46,10 @@ PERSONA_CACHE = "moe_affinity_persona_id"
 
 def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
-    for module in (store, scoring, mood, personas, rules_info, migrate_self_learning, webui_api):
+    for module in (
+        store, scoring, mood, personas, rules_info, migrate_self_learning,
+        checkin_sync, webui_api,
+    ):
         try:
             importlib.reload(module)
         except Exception as exc:  # 重载失败不应让插件装不上
@@ -145,6 +148,7 @@ class MoeAffinityPlugin(Star):
 
     async def initialize(self) -> None:
         """预建角色、注册控制台路由；失败只记日志，不影响插件本体。"""
+        self._checkin_task = None
         try:
             created = self._seed_roles()
             if created:
@@ -155,6 +159,10 @@ class MoeAffinityPlugin(Star):
             webui_api.register_apis(self)
         except Exception as exc:
             logger.error(f"[moe_affinity] 控制台路由注册失败: {exc}")
+        try:
+            self._checkin_task = asyncio.create_task(self._checkin_loop())
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 签到同步任务启动失败: {exc}")
 
     def _seed_roles(self) -> int:
         """按当前人格预建角色。
@@ -277,6 +285,84 @@ class MoeAffinityPlugin(Star):
             ),
         )
 
+    # ------------------------------------------------------------------ 签到同步
+    def _checkin_cfg(self) -> dict:
+        cfg = self._section("checkin_sync")
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "interval_minutes": max(15, int(cfg.get("interval_minutes", 60) or 60)),
+            "scale": float(cfg.get("scale", 1.0) or 1.0),
+            "inject": bool(cfg.get("inject", True)),
+            "db_path": str(cfg.get("db_path") or "").strip(),
+        }
+
+    def _checkin_db_path(self):
+        """定位签到插件的库（对方没装返回 None，同步静默待机）。"""
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            data_dir = Path(get_astrbot_data_path())
+        except Exception:
+            data_dir = None
+        return checkin_sync.resolve_db_path(self._checkin_cfg()["db_path"], data_dir)
+
+    async def _checkin_loop(self) -> None:
+        """每小时扫一次「昨天 + 今天」的签到记录；幂等键保证重扫不重复加分。"""
+        await asyncio.sleep(180)  # 错开启动高峰，等其它插件装载完
+        while True:
+            try:
+                cfg = self._checkin_cfg()
+                if cfg["enabled"]:
+                    path = self._checkin_db_path()
+                    if path is not None:
+                        stats = await asyncio.to_thread(
+                            checkin_sync.sync_recent, self.store, path, scale=cfg["scale"]
+                        )
+                        if stats.get("written"):
+                            logger.info(f"[moe_affinity] 签到同步 +{stats['written']} 条")
+            except Exception as exc:
+                logger.warning(f"[moe_affinity] 签到同步失败: {exc}")
+            await asyncio.sleep(self._checkin_cfg()["interval_minutes"] * 60)
+
+    async def _ensure_checkin_fresh(self, user_id: str) -> None:
+        """查询指令触发的按需同步；带防重读（今天已有事件 / 60 秒节流），失败静默。"""
+        cfg = self._checkin_cfg()
+        if not cfg["enabled"] or not user_id:
+            return
+        try:
+            path = self._checkin_db_path()
+            if path is None:
+                return
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    checkin_sync.ensure_user_fresh,
+                    self.store,
+                    path,
+                    str(user_id),
+                    scale=cfg["scale"],
+                ),
+                timeout=6,
+            )
+        except Exception as exc:
+            logger.debug(f"[moe_affinity] 签到按需同步跳过: {exc}")
+
+    async def _checkin_view(self, user_id: str) -> dict | None:
+        """用户级签到概况（指令输出 / 注入 / 控制台共用）。"""
+        summaries = await asyncio.to_thread(
+            self.store.user_source_summaries,
+            source=checkin_sync.SOURCE,
+            user_ids=[str(user_id)],
+        )
+        summary = summaries.get(str(user_id))
+        if not summary:
+            return None
+        last = await asyncio.to_thread(
+            self.store.user_source_last, source=checkin_sync.SOURCE, user_id=str(user_id)
+        )
+        view = dict(summary)
+        view["streak"] = checkin_sync.streak_from_evidence((last or {}).get("evidence") or "")
+        return view
+
     # ------------------------------------------------------------------ 通用
     async def _role_for(self, event: AstrMessageEvent) -> tuple[str, str]:
         persona_id = await personas.resolve_persona_id(self.context, event)
@@ -321,7 +407,10 @@ class MoeAffinityPlugin(Star):
         )
         return f"心情：{desc}（{detail}）"
 
-    def _render_detail(self, snapshot: dict, *, title: str, mood_view: dict | None = None) -> str:
+    def _render_detail(
+        self, snapshot: dict, *, title: str, mood_view: dict | None = None,
+        checkin_view: dict | None = None,
+    ) -> str:
         if snapshot.get("status") != "ok":
             return f"{title}\n暂无好感度记录（还没聊过，或数据未就绪）。"
         now = int(time.time())
@@ -343,6 +432,13 @@ class MoeAffinityPlugin(Star):
         mood_line = self._mood_line(mood_view)
         if mood_line:
             lines.append(mood_line)
+        if checkin_view:
+            streak = int(checkin_view.get("streak") or 0)
+            streak_text = f"（连签 {streak} 天）" if streak > 0 else ""
+            lines.append(
+                f"签到亲密度 {checkin_view.get('score', 0)} · "
+                f"累计 {checkin_view.get('days', 0)} 天{streak_text}"
+            )
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 计分
@@ -432,15 +528,20 @@ class MoeAffinityPlugin(Star):
                 if self._mood_cfg()["enabled"] and self._mood_cfg()["inject"]
                 else None
             )
+            checkin_view = (
+                await self._checkin_view(user_id) if self._checkin_cfg()["inject"] else None
+            )
         except Exception as exc:
             logger.warning(f"[moe_affinity] 读取好感度失败: {exc}")
             return
         if snapshot.get("status") != "ok":
             return
-        block = self._render_block(snapshot, mood_view)
+        block = self._render_block(snapshot, mood_view, checkin_view)
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + "\n" + block
 
-    def _render_block(self, snapshot: dict, mood_view: dict | None = None) -> str:
+    def _render_block(
+        self, snapshot: dict, mood_view: dict | None = None, checkin_view: dict | None = None
+    ) -> str:
         cfg = self._section("inject")
         now = int(time.time())
         days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
@@ -451,6 +552,8 @@ class MoeAffinityPlugin(Star):
         body = f"{head}，认识 {days} 天，最近互动在{gap}。"
         if mood_view and not mood_view.get("neutral"):
             body += f"心情：{mood_view.get('description', '')}。"
+        if checkin_view:
+            body += f"签到累计 {checkin_view.get('days', 0)} 天（亲密度 {checkin_view.get('score', 0)}）。"
         if cfg.get("include_hint", True):
             body += "这是表达参考：不要向用户播报分数，也不要把它当作权限或事实依据。"
         limit = int(cfg.get("max_chars", 140) or 140)
@@ -531,6 +634,9 @@ class MoeAffinityPlugin(Star):
             )
             return
 
+        # 查询前顺手补一次签到同步（带防重读：今天已有事件 / 60 秒节流）
+        await self._ensure_checkin_fresh(target if (target and target != sender) else sender)
+
         if target and target != sender:
             if not admin:
                 yield event.plain_result("普通成员只能查看自己的好感度。")
@@ -542,8 +648,11 @@ class MoeAffinityPlugin(Star):
                 f"{target_name} 与「{alias}」的关系" if alias else f"「{target_name}」的好感度"
             )
             mood_view = await asyncio.to_thread(self._mood_view, role_id)
+            checkin_view = await self._checkin_view(target)
             yield event.plain_result(
-                self._render_detail(snapshot, title=title, mood_view=mood_view)
+                self._render_detail(
+                    snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
+                )
             )
             return
 
@@ -562,7 +671,10 @@ class MoeAffinityPlugin(Star):
         alias = await asyncio.to_thread(self.store.role_alias, role_id)
         title = f"你与「{alias}」的关系" if alias else f"「{name}」的好感度"
         mood_view = await asyncio.to_thread(self._mood_view, role_id)
-        text = self._render_detail(snapshot, title=title, mood_view=mood_view)
+        checkin_view = await self._checkin_view(sender)
+        text = self._render_detail(
+            snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
+        )
         if recent:
             parts = [
                 f"{store.CODE_LABELS.get(item['code'], item['code'])} {int(item['delta']):+d}"
@@ -612,10 +724,15 @@ class MoeAffinityPlugin(Star):
             who = sender
         elif who != sender and not self._is_admin(event):
             return '{"status":"denied","message":"普通成员只能查询自己的好感度。"}'
+        await self._ensure_checkin_fresh(who)
         role_id, persona_id = await self._role_for(event)
         snapshot = await asyncio.to_thread(self.store.snapshot, role_id, who, self._rules())
         snapshot.update(role_id=role_id, persona_id=persona_id, read_only=True)
+        snapshot["checkin"] = await self._checkin_view(who)
         return json.dumps(snapshot, ensure_ascii=False)
 
     async def terminate(self):
+        task = getattr(self, "_checkin_task", None)
+        if task is not None:
+            task.cancel()
         return None

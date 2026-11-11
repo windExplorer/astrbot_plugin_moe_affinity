@@ -58,6 +58,7 @@ const roleLabel = computed(() => {
   return role.alias || role.display_name || role.role_id;
 });
 const today = computed(() => detail.value?.today);
+const checkin = computed(() => detail.value?.checkin);
 const todayGainRatio = computed(() => {
   const value = today.value;
   if (!value || !value.gain_cap) return 0;
@@ -255,6 +256,22 @@ function saved() {
         <span class="v mono">{{ today?.events ?? 0 }}</span>
         <span class="s">次计分（纯指令不计）</span>
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <div class="card-t">签到</div>
+        <div class="spacer"></div>
+        <div class="card-s">来自画境拾珍 · 用户级数据，与角色无关、不占每日上限</div>
+      </div>
+      <div v-if="checkin && checkin.days > 0" class="row">
+        <span class="pill">亲密度 {{ checkin.score }}</span>
+        <span class="faint">累计 {{ checkin.days }} 天</span>
+        <span v-if="checkin.streak > 0" class="faint">· 连签 {{ checkin.streak }} 天</span>
+        <div class="spacer"></div>
+        <span v-if="checkin.last_at" class="faint">最近签到 {{ timeAgo(checkin.last_at) }}</span>
+      </div>
+      <div v-else class="empty">还没有签到数据（画境拾珍未安装，或还没同步到）</div>
     </div>
 
     <div class="card">

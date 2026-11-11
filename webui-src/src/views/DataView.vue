@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import {
+  apiCheckinStatus,
+  apiCheckinSync,
   apiMigrateApply,
   apiMigratePreview,
   apiMigrateRepair,
   apiRoles,
+  type CheckinStatus,
   type MigratePreview,
   type RoleRow,
 } from "../api";
@@ -14,6 +17,8 @@ import { fmtDate, timeAgo } from "../lib/format";
 const preview = ref<MigratePreview | null>(null);
 const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
+const checkinSyncing = ref(false);
+const checkin = ref<CheckinStatus | null>(null);
 const path = ref("");
 const clearMood = ref(true);
 const roles = ref<RoleRow[]>([]);
@@ -35,10 +40,46 @@ async function load() {
       target.value = app.role || roles.value[0]?.role_id || "";
     }
     await reloadPreview();
+    await loadCheckin();
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
     busy.value = false;
+  }
+}
+
+async function loadCheckin() {
+  try {
+    checkin.value = await apiCheckinStatus();
+  } catch {
+    checkin.value = null;
+  }
+}
+
+async function checkinSync(full: boolean) {
+  checkinSyncing.value = true;
+  try {
+    const res = await apiCheckinSync(full);
+    if (full) {
+      notify(
+        res.written > 0
+          ? `已导入 ${res.written} 条历史签到（回填认识时间 ${res.first_seen_repaired} 人）`
+          : `没有新要导入的签到（共读过 ${res.records} 条，均已入库）`,
+        res.written === 0,
+      );
+    } else {
+      notify(
+        res.written > 0
+          ? `已同步 ${res.written} 条签到记录`
+          : "没有待同步的新签到（可能都已同步过）",
+        false,
+      );
+    }
+    await loadCheckin();
+  } catch (e: any) {
+    notify(e?.message || String(e), true);
+  } finally {
+    checkinSyncing.value = false;
   }
 }
 
@@ -140,6 +181,33 @@ onMounted(load);
 </script>
 
 <template>
+  <div class="card">
+    <div class="card-h">
+      <div class="card-t">签到好感同步（画境拾珍）</div>
+      <div class="spacer"></div>
+      <n-button size="small" quaternary :loading="checkinSyncing" @click="checkinSync(false)">
+        立即同步
+      </n-button>
+      <n-button size="small" quaternary :loading="checkinSyncing" @click="checkinSync(true)">
+        导入全部历史
+      </n-button>
+    </div>
+    <div class="muted">
+      <template v-if="checkin?.exists">
+        已找到对方库（{{ checkin.users }} 人 / {{ checkin.records }} 条签到记录<template v-if="checkin.first_date">，{{ checkin.first_date }} 起</template>）
+        · 已导入 {{ checkin.imported?.events ?? 0 }} 条、覆盖 {{ checkin.imported?.users ?? 0 }} 人
+        <span v-if="checkin.imported?.last_at" class="faint">· 最近一次 {{ timeAgo(checkin.imported.last_at) }}</span>
+        <span class="faint">· 系数 ×{{ checkin.scale }}</span>
+      </template>
+      <template v-else>没找到画境拾珍的 checkin.sqlite3 —— 未安装时忽略本卡片即可。</template>
+    </div>
+    <div class="faint" style="margin-top: 6px">
+      签到好感是「用户 × bot」粒度，不挂角色：任何人格的注入看到的都是同一份，不会翻倍，也不占每日上限。
+      每小时自动同步「昨天+今天」；用户用 /好感度 查询时会顺手补一次（防重读）。
+      「导入全部历史」会把对方的所有签到记录一次性折算进来，重复点击是安全的。
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-h">
       <div class="card-t">从自我学习插件迁移</div>

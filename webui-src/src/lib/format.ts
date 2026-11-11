@@ -50,6 +50,7 @@ export const CODE_LABELS: Record<string, string> = {
   "manual.reset": "重置",
   "manual.merge": "角色归并",
   "import.seed": "迁移导入",
+  "checkin.checkin": "签到",
 };
 
 export function codeLabel(code: string): string {

@@ -620,6 +620,104 @@ def test_migration():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_checkin_sync():
+    print("[checkin]")
+    import sqlite3
+
+    import checkin_sync as cs
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_ckin_"))
+    try:
+        db_path = tmp / "checkin.sqlite3"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                "CREATE TABLE checkin_users(user_id TEXT PRIMARY KEY, affection REAL,"
+                " created_at TEXT, updated_at TEXT);"
+                "CREATE TABLE checkin_records(date_key TEXT, user_id TEXT, username TEXT,"
+                " base_affection REAL, bonus_affection REAL, affection_reward REAL,"
+                " boost_active INTEGER, boost_multiplier REAL, streak_days_after INTEGER,"
+                " created_at TEXT, updated_at TEXT, PRIMARY KEY(date_key, user_id));"
+            )
+            conn.executemany(
+                "INSERT INTO checkin_users VALUES(?,?,?,?)",
+                [
+                    ("u1", 1.9, "2026-01-01T09:00:00+08:00", "2026-01-02T09:00:00+08:00"),
+                    ("u2", 0.5, "2026-01-03T09:00:00+08:00", "2026-01-03T09:00:00+08:00"),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO checkin_records VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    ("2026-01-01", "u1", "小明", 0.8, 0.0, 0.8, 0, 1.0, 1,
+                     "2026-01-01T09:00:00+08:00", "2026-01-01T09:00:00+08:00"),
+                    ("2026-01-02", "u1", "小明", 0.9, 0.2, 1.1, 1, 2.0, 2,
+                     "2026-01-02T09:00:00+08:00", "2026-01-02T09:00:00+08:00"),
+                    ("2026-01-03", "u2", "小红", 0.5, 0.0, 0.5, 0, 1.0, 1,
+                     "2026-01-03T09:00:00+08:00", "2026-01-03T09:00:00+08:00"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db = store.AffinityStore(tmp / "a.db")
+        stats = cs.sync_full(db, db_path, scale=2.0)
+        check("全量导入 3 条", stats["written"] == 3, str(stats))
+        summaries = db.user_source_summaries(source=cs.SOURCE, user_ids=["u1", "u2"])
+        check("系数 ×2 后 u1 = 3.8", abs(summaries["u1"]["score"] - 3.8) < 1e-6, str(summaries))
+        check("u1 两天", summaries["u1"]["days"] == 2, str(summaries))
+        check("u2 = 1.0", abs(summaries["u2"]["score"] - 1.0) < 1e-6, str(summaries))
+
+        repeat = cs.sync_full(db, db_path, scale=2.0)
+        check("重复导入不加分", repeat["written"] == 0, str(repeat))
+
+        last = db.user_source_last(source=cs.SOURCE, user_id="u1")
+        check(
+            "审计快照连续 (1.6 -> 3.8)",
+            last is not None and abs(last["after"] - 3.8) < 1e-6 and abs(last["before"] - 1.6) < 1e-6,
+            str(last),
+        )
+        check("连签天数在 evidence 里", cs.streak_from_evidence(last["evidence"]) == 2, str(last))
+
+        # 首次签到建档时间 → 认识时间回填（只提前不推后）
+        rules = store.Rules()
+        role = db.ensure_role("p1")
+        db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=5,
+                       rules=rules, now=2000000000)
+        cs.sync_full(db, db_path, scale=2.0)
+        first_seen = int(datetime.fromisoformat("2026-01-01T09:00:00+08:00").timestamp())
+        seen = db.snapshot(role, "u1", rules, now=2000000000)
+        check("认识时间回填到首次签到", seen["first_seen_at"] == first_seen, str(seen["first_seen_at"]))
+
+        # 按需同步：执行 -> 节流 -> 今天已有事件则完全不读
+        res = cs.ensure_user_fresh(db, db_path, "u2")
+        check("按需同步执行", res["status"] == "ok", str(res))
+        check("60 秒内节流", cs.ensure_user_fresh(db, db_path, "u2")["status"] == "throttled")
+
+        conn = sqlite3.connect(db_path)
+        try:
+            today = cs.today_key()
+            conn.execute(
+                "INSERT OR REPLACE INTO checkin_records VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (today, "u2", "小红", 0.6, 0.0, 0.6, 0, 1.0, 2,
+                 f"{today}T09:00:00+08:00", f"{today}T09:00:00+08:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        cs._USER_CHECK_AT.clear()
+        got = cs.ensure_user_fresh(db, db_path, "u2")
+        check("当天记录可按需同步", got["status"] == "ok" and got["written"] == 1, str(got))
+        cs._USER_CHECK_AT.clear()
+        check("今天已有事件不再读库", cs.ensure_user_fresh(db, db_path, "u2")["status"] == "fresh")
+
+        total = db.user_source_total(source=cs.SOURCE)
+        check("全局概况 4 条 / 2 人", total["events"] == 4 and total["users"] == 2, str(total))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_schema()
     test_stage()
@@ -635,6 +733,7 @@ def main():
     test_identity_cache()
     test_migration_role_scope()
     test_migration()
+    test_checkin_sync()
     print()
     if FAILED:
         print(f"RESULT: FAIL ({len(FAILED)}): " + ", ".join(FAILED))

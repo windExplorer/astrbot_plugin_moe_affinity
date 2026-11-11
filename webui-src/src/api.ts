@@ -168,6 +168,8 @@ export interface UserRow {
   next_stage_label: string;
   first_seen_at: number;
   last_interaction_at: number;
+  checkin_score?: number;
+  checkin_days?: number;
 }
 
 export interface UsersPage {
@@ -212,6 +214,7 @@ export interface UserDetail {
     created_at: number;
   }[];
   group_delta_total?: number;
+  checkin?: { score: number; days: number; last_at: number; streak: number } | null;
 }
 
 export interface GroupRow {
@@ -429,6 +432,28 @@ export const apiSync = (members = false) =>
     180000,
   );
 
+export interface CheckinStatus {
+  exists: boolean;
+  path: string;
+  users: number;
+  records: number;
+  first_date: string;
+  last_date: string;
+  enabled: boolean;
+  scale: number;
+  imported: { events: number; users: number; score: number; last_at: number };
+}
+
+export interface CheckinSyncStats {
+  status?: string;
+  records: number;
+  written: number;
+  first_seen_repaired: number;
+}
+
+export const apiCheckinStatus = () => apiGet<CheckinStatus>("/checkin/status");
+export const apiCheckinSync = (full = false) =>
+  apiPost<CheckinSyncStats>("/checkin/sync", { full }, 120000);
 export const apiAvatars = (kind: "user" | "group", ids: string[], force = false) => {
   const p = new URLSearchParams({ type: kind, ids: ids.join(",") });
   if (force) p.set("force", "1");

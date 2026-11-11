@@ -44,6 +44,7 @@ CODE_LABELS: dict[str, str] = {
     "manual.reset": "重置",
     "manual.merge": "角色归并",
     "import.seed": "迁移导入",
+    "checkin.checkin": "签到",
 }
 
 SCHEMA = """
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_user ON events(role_id, user_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_events_group ON events(role_id, group_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_source_user ON events(source, user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_events_dedupe
     ON events(source, dedupe_key) WHERE dedupe_key IS NOT NULL;
 """
@@ -947,6 +949,121 @@ class AffinityStore:
                     (key, data_uri, moment),
                 )
         return len(mapping)
+
+    # ------------------------------------------------------- 用户级外部流水
+    # 「对 bot 整体」粒度的外部数据（签到插件好感等）：不挂角色、不建 affinities 行、
+    # 不占每日上限，聚合分数读时计算。事件仍在唯一索引 (source, dedupe_key) 上幂等。
+
+    def record_user_events(self, *, source: str, code: str, rows: list[dict[str, Any]]) -> int:
+        """批量写入用户级事件（幂等），返回实际落库条数。
+
+        ``rows`` 每项需要 ``user_id / dedupe_key / delta / evidence / created_at``；
+        before/after 维护该用户此来源的累计快照（仅审计展示用），重跑时被唯一索引吞掉、
+        快照保持不动。
+        """
+        if not rows:
+            return 0
+        moment = int(time.time())
+        inserted = 0
+        with self._db() as conn:
+            running: dict[str, float] = {}
+            uids = sorted({str(row.get("user_id") or "").strip() for row in rows if row.get("user_id")})
+            if uids:
+                placeholders = ",".join("?" for _ in uids)
+                for row in conn.execute(
+                    f"SELECT user_id, COALESCE(SUM(delta), 0) AS s FROM events"
+                    f" WHERE source = ? AND user_id IN ({placeholders}) GROUP BY user_id",
+                    [source, *uids],
+                ):
+                    running[str(row["user_id"])] = float(row["s"])
+            for row in rows:
+                uid = str(row.get("user_id") or "").strip()
+                key = str(row.get("dedupe_key") or "").strip()
+                delta = round(float(row.get("delta") or 0.0), 2)
+                if not uid or not key or delta == 0.0:
+                    continue
+                before = running.get(uid, 0.0)
+                after = round(before + delta, 2)
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO events(role_id, user_id, persona_id, platform,"
+                    " session_id, group_id, is_group, source, code, delta, before, after,"
+                    " evidence, dedupe_key, operator, created_at)"
+                    " VALUES('',?,'','','','',0,?,?,?,?,?,?,?,'sync',?)",
+                    (
+                        uid,
+                        source,
+                        code,
+                        delta,
+                        before,
+                        after,
+                        str(row.get("evidence") or ""),
+                        key,
+                        int(row.get("created_at") or moment),
+                    ),
+                )
+                if cursor.rowcount:
+                    running[uid] = after
+                    inserted += 1
+        return inserted
+
+    def has_user_source_event(self, *, source: str, dedupe_key: str) -> bool:
+        """某来源 + 幂等键的事件是否已存在（按需同步防重读的第一道闸）。"""
+        with self._db() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM events WHERE source = ? AND dedupe_key = ? LIMIT 1",
+                    (source, dedupe_key),
+                ).fetchone()
+                is not None
+            )
+
+    def user_source_summaries(self, *, source: str, user_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """按用户聚合某来源流水：分数 / 天数 / 最近一次时间。"""
+        uids = sorted({str(u).strip() for u in user_ids if str(u).strip()})
+        if not uids:
+            return {}
+        placeholders = ",".join("?" for _ in uids)
+        with self._db() as conn:
+            rows = conn.execute(
+                f"SELECT user_id, SUM(delta) AS score, COUNT(*) AS days,"
+                f" MAX(created_at) AS last_at FROM events"
+                f" WHERE source = ? AND user_id IN ({placeholders}) GROUP BY user_id",
+                [source, *uids],
+            ).fetchall()
+        return {
+            str(row["user_id"]): {
+                "score": round(float(row["score"] or 0.0), 2),
+                "days": int(row["days"]),
+                "last_at": int(row["last_at"] or 0),
+            }
+            for row in rows
+        }
+
+    def user_source_last(self, *, source: str, user_id: str) -> dict[str, Any] | None:
+        """某用户该来源最近一条事件（取 evidence 里的连签等信息）。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT delta, before, after, evidence, created_at FROM events"
+                " WHERE source = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+                (source, str(user_id).strip()),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def user_source_total(self, *, source: str) -> dict[str, Any]:
+        """某来源的全局概况（控制台状态卡用）。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS events, COUNT(DISTINCT user_id) AS users,"
+                " COALESCE(SUM(delta), 0) AS score, MAX(created_at) AS last_at"
+                " FROM events WHERE source = ?",
+                (source,),
+            ).fetchone()
+        return {
+            "events": int(row["events"]),
+            "users": int(row["users"]),
+            "score": round(float(row["score"] or 0.0), 2),
+            "last_at": int(row["last_at"] or 0),
+        }
 
     def _settle_role(self, conn: sqlite3.Connection, role_id: str, rules: Rules, now: int) -> None:
         rows = conn.execute(
