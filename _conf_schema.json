@@ -1,0 +1,8 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用好感度中枢",
+    "hint": "当前为仓库骨架版本：即使开启也不会改变对话行为，数据表与对外契约尚未实现。",
+    "default": false
+  }
+}
