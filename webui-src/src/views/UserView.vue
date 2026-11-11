@@ -1,15 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { apiUser, type UserDetail, type UserRow } from "../api";
+import { apiMood, apiUser, type MoodData, type UserDetail, type UserRow } from "../api";
 import { app, notify } from "../state";
 import EChart from "../components/EChart.vue";
 import ScoreDialog from "../components/ScoreDialog.vue";
-import { CHART_COLORS, codeLabel, fmtTime, initials, signed, timeAgo } from "../lib/format";
+import {
+  CHART_COLORS,
+  codeLabel,
+  daysSince,
+  fmtDate,
+  fmtTime,
+  signed,
+  timeAgo,
+} from "../lib/format";
 
 const route = useRoute();
 const router = useRouter();
 const detail = ref<UserDetail | null>(null);
+const mood = ref<MoodData | null>(null);
 const busy = ref(false);
 const editing = ref(false);
 
@@ -19,7 +28,12 @@ async function load() {
   if (!app.role || !userId.value) return;
   busy.value = true;
   try {
-    detail.value = await apiUser(app.role, userId.value, 30);
+    const [userRes, moodRes] = await Promise.all([
+      apiUser(app.role, userId.value, 30),
+      apiMood(app.role).catch(() => null),
+    ]);
+    detail.value = userRes;
+    mood.value = moodRes;
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -32,8 +46,36 @@ watch(() => [app.role, userId.value], load);
 
 const snap = computed(() => detail.value?.snapshot as any);
 const ratio = computed(() => Math.min(100, (snap.value?.overall_progress || 0) * 100));
-const knownDays = computed(() =>
-  snap.value ? Math.max(0, Math.floor((Date.now() / 1000 - snap.value.first_seen_at) / 86400)) : 0,
+const knownDays = computed(() => daysSince(snap.value?.first_seen_at));
+const gapToNext = computed(() => {
+  if (!snap.value?.next_stage_label || !snap.value?.next_stage_at) return "";
+  const need = Math.max(0, Math.ceil(snap.value.next_stage_at - snap.value.score));
+  return `距${snap.value.next_stage_label}还差 ${need}`;
+});
+const roleLabel = computed(() => {
+  const role = detail.value?.role;
+  if (!role) return app.role;
+  return role.alias || role.display_name || role.role_id;
+});
+const today = computed(() => detail.value?.today);
+const todayGainRatio = computed(() => {
+  const value = today.value;
+  if (!value || !value.gain_cap) return 0;
+  return Math.min(100, (value.gain / value.gain_cap) * 100);
+});
+const todayLossRatio = computed(() => {
+  const value = today.value;
+  if (!value || !value.loss_cap) return 0;
+  return Math.min(100, (value.loss / value.loss_cap) * 100);
+});
+
+const MOOD_LABELS: Record<string, string> = { joy: "喜悦", anger: "烦躁", sorrow: "低落", fear: "不安" };
+const moodAxes = computed(() =>
+  Object.entries(mood.value?.axes || {}).map(([key, value]) => ({
+    key,
+    label: MOOD_LABELS[key] || key,
+    value,
+  })),
 );
 
 const chart = computed(() => {
@@ -70,6 +112,10 @@ const asRow = computed<UserRow | null>(() => {
     score: snap.value.score,
     stage: snap.value.stage,
     stage_label: snap.value.stage_label,
+    progress: snap.value.progress,
+    overall_progress: snap.value.overall_progress,
+    next_stage_at: snap.value.next_stage_at,
+    next_stage_label: snap.value.next_stage_label,
     first_seen_at: snap.value.first_seen_at,
     last_interaction_at: snap.value.last_interaction_at,
   };
@@ -103,7 +149,11 @@ function saved() {
         <Avatar :id="snap.user_id" :name="snap.display_name || snap.user_id" :size="56" />
         <div style="flex: 1; min-width: 0">
           <div style="font-size: 18px; font-weight: 650">{{ snap.display_name || snap.user_id }}</div>
-          <div class="faint">{{ snap.user_id }}<span v-if="snap.platform"> · {{ snap.platform }}</span></div>
+          <div class="faint">
+            {{ snap.user_id
+            }}<span v-if="snap.platform"> · {{ snap.platform }}</span>
+            <span v-if="roleLabel"> · 角色：{{ roleLabel }}</span>
+          </div>
         </div>
         <div class="row">
           <n-button size="small" type="primary" secondary @click="editing = true">调整分数</n-button>
@@ -114,9 +164,7 @@ function saved() {
         <div style="font-size: 30px; font-weight: 700" class="mono">{{ snap.score }}</div>
         <div class="muted">分</div>
         <span class="pill">{{ snap.stage_label }}</span>
-        <span v-if="snap.next_stage_label" class="faint">
-          距{{ snap.next_stage_label }}还差 {{ Math.max(0, Math.ceil(snap.next_stage_at - snap.score)) }}
-        </span>
+        <span v-if="gapToNext" class="faint">{{ gapToNext }}</span>
         <div class="spacer"></div>
         <span class="faint">历史最高 {{ snap.peak }} · 本角色第 {{ snap.rank }} 名</span>
       </div>
@@ -125,12 +173,51 @@ function saved() {
       </div>
 
       <div class="row" style="margin-top: 12px">
-        <span class="faint">认识 {{ knownDays }} 天</span>
+        <span class="faint">认识 {{ knownDays }} 天（首次 {{ fmtDate(snap.first_seen_at) }}）</span>
         <span class="faint">·</span>
-        <span class="faint">最近互动 {{ timeAgo(snap.last_interaction_at) }}</span>
+        <span class="faint">最近互动 {{ timeAgo(snap.last_interaction_at) }}（{{ fmtTime(snap.last_interaction_at) }}）</span>
         <span class="faint">·</span>
-        <span class="faint">本群贡献合计 {{ signed(detail?.group_delta_total || 0) }}</span>
+        <span class="faint">群贡献合计 {{ signed(detail?.group_delta_total || 0) }}</span>
       </div>
+    </div>
+
+    <div class="grid cols-3">
+      <div class="stat">
+        <span class="k">今日涨分</span>
+        <span class="v mono">{{ today?.gain ?? 0 }} / {{ today?.gain_cap ?? "-" }}</span>
+        <div class="bar" style="margin-top: 6px">
+          <i :style="{ width: todayGainRatio + '%' }"></i>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="k">今日扣分</span>
+        <span class="v mono">{{ today?.loss ?? 0 }} / {{ today?.loss_cap ?? "-" }}</span>
+        <div class="bar" style="margin-top: 6px">
+          <i :style="{ width: todayLossRatio + '%' }"></i>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="k">今日事件</span>
+        <span class="v mono">{{ today?.events ?? 0 }}</span>
+        <span class="s">次计分（纯指令不计）</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <div class="card-t">当前心情</div>
+        <div class="spacer"></div>
+        <div class="card-s">属于角色自己，不是对某人的态度 · {{ mood?.half_life_minutes ?? 90 }} 分钟半衰期</div>
+      </div>
+      <div v-if="mood?.enabled" class="row">
+        <span class="pill">{{ mood.description }}</span>
+        <n-tag v-for="axis in moodAxes" :key="axis.key" size="small" round :bordered="false">
+          {{ axis.label }} {{ axis.value }} / 10
+        </n-tag>
+        <div class="spacer"></div>
+        <span class="faint">更新于 {{ timeAgo(mood.updated_at) }}</span>
+      </div>
+      <div v-else class="empty">心情未启用（配置 → 心情）</div>
     </div>
 
     <div class="grid cols-2">
@@ -144,7 +231,7 @@ function saved() {
         <div class="card-h">
           <div class="card-t">群贡献</div>
           <div class="spacer"></div>
-          <div class="card-s">分数是全局一份，这里看每个群挣了多少</div>
+          <div class="card-s">分数全局一份，这里看每个群挣了多少</div>
         </div>
         <table v-if="detail?.groups?.length">
           <thead>
@@ -156,7 +243,12 @@ function saved() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="group in detail.groups" :key="group.group_id" class="clickable" @click="router.push(`/groups/${group.group_id}`)">
+            <tr
+              v-for="group in detail.groups"
+              :key="group.group_id"
+              class="clickable"
+              @click="router.push(`/groups/${group.group_id}`)"
+            >
               <td>{{ group.group_name || group.group_id }}</td>
               <td class="mono" :class="group.delta >= 0 ? 'pos' : 'neg'">{{ signed(group.delta) }}</td>
               <td class="mono">{{ group.events }}</td>
@@ -198,7 +290,7 @@ function saved() {
       <div class="card-h">
         <div class="card-t">事件流水</div>
         <div class="spacer"></div>
-        <div class="card-s">最近 50 条</div>
+        <div class="card-s">最近 50 条 · 数据版本 {{ snap.revision }}</div>
       </div>
       <table>
         <thead>
@@ -206,6 +298,7 @@ function saved() {
             <th style="width: 110px">时间</th>
             <th style="width: 110px">事件</th>
             <th style="width: 80px">变化</th>
+            <th style="width: 120px">分数</th>
             <th>来源 / 说明</th>
           </tr>
         </thead>
@@ -214,6 +307,7 @@ function saved() {
             <td class="faint">{{ fmtTime(event.created_at) }}</td>
             <td><span class="pill">{{ codeLabel(event.code) }}</span></td>
             <td class="mono" :class="event.delta >= 0 ? 'pos' : 'neg'">{{ signed(event.delta) }}</td>
+            <td class="faint mono">{{ Math.round(event.before) }} → {{ Math.round(event.after) }}</td>
             <td class="muted">
               {{ event.source }}
               <span v-if="event.persona_id" class="faint">· {{ event.persona_id }}</span>
@@ -223,7 +317,7 @@ function saved() {
             </td>
           </tr>
           <tr v-if="!(detail?.events || []).length">
-            <td colspan="4"><div class="empty">暂无流水</div></td>
+            <td colspan="5"><div class="empty">暂无流水</div></td>
           </tr>
         </tbody>
       </table>

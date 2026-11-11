@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { apiSync, apiUsers, type UserRow } from "../api";
 import { app, notify } from "../state";
-import { initials, timeAgo } from "../lib/format";
+import { daysSince, initials, timeAgo } from "../lib/format";
 import ScoreDialog from "../components/ScoreDialog.vue";
 
 const route = useRoute();
@@ -34,6 +34,7 @@ const STAGES = [
 const SORTS = [
   { label: "按分数", value: "score" },
   { label: "按最近互动", value: "recent" },
+  { label: "按认识时间", value: "since" },
   { label: "按昵称", value: "name" },
 ];
 
@@ -158,6 +159,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           <th>用户</th>
           <th style="width: 200px">分数</th>
           <th style="width: 90px">档位</th>
+          <th style="width: 88px">认识</th>
           <th style="width: 110px">最近互动</th>
           <th style="width: 96px"></th>
         </tr>
@@ -183,13 +185,14 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
             </div>
           </td>
           <td><n-tag size="small" round :bordered="false">{{ row.stage_label }}</n-tag></td>
+          <td class="faint mono">{{ daysSince(row.first_seen_at) }} 天</td>
           <td class="faint">{{ timeAgo(row.last_interaction_at) }}</td>
           <td>
             <n-button size="small" quaternary @click.stop="adjustTarget = row">调整</n-button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td colspan="6">
+          <td colspan="7">
             <div class="empty">{{ busy ? "加载中…" : "没有匹配的用户" }}</div>
           </td>
         </tr>

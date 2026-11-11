@@ -182,6 +182,9 @@ export interface UsersPage {
 export interface UserDetail {
   status: string;
   role_id: string;
+  today?: { gain: number; loss: number; events: number; gain_cap: number; loss_cap: number };
+  role?: { role_id: string; alias: string; display_name: string; personas: number };
+  last_settled_at?: number;
   snapshot?: UserRow & { peak: number; revision: number; stage_floor: number };
   series?: { day: string; delta: number; events: number }[];
   groups?: { group_id: string; group_name: string; delta: number; events: number; last_at: number }[];

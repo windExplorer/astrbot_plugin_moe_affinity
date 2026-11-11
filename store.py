@@ -939,6 +939,7 @@ class AffinityStore:
             "score": "score DESC, last_interaction_at DESC",
             "recent": "last_interaction_at DESC, score DESC",
             "name": "display_name ASC, user_id ASC",
+            "since": "first_seen_at ASC, score DESC",
         }.get(sort, "score DESC, last_interaction_at DESC")
         where = "role_id = ?"
         args: list[Any] = [role_id]
@@ -1118,9 +1119,40 @@ class AffinityStore:
                 " WHERE role_id = ? AND user_id = ? AND group_id <> ''",
                 (role_id, user_id),
             ).fetchone()["s"]
+            today = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0) AS gain,"
+                " COALESCE(SUM(CASE WHEN delta < 0 THEN delta ELSE 0 END), 0) AS loss,"
+                " COUNT(*) AS events FROM events"
+                " WHERE role_id = ? AND user_id = ? AND created_at >= ?",
+                (role_id, user_id, day_start(moment)),
+            ).fetchone()
+            role_row = conn.execute(
+                "SELECT display_name, alias FROM roles WHERE role_id = ?", (role_id,)
+            ).fetchone()
+            persona_total = conn.execute(
+                "SELECT COUNT(*) AS c FROM role_personas WHERE role_id = ?", (role_id,)
+            ).fetchone()["c"]
+            settled_row = conn.execute(
+                "SELECT last_settled_at FROM affinities WHERE role_id = ? AND user_id = ?",
+                (role_id, user_id),
+            ).fetchone()
         return {
             "status": "ok",
             "snapshot": snapshot,
+            "today": {
+                "gain": round(float(today["gain"]), 1),
+                "loss": round(abs(float(today["loss"])), 1),
+                "events": int(today["events"]),
+                "gain_cap": float(rules.daily_gain_cap),
+                "loss_cap": float(rules.daily_loss_cap),
+            },
+            "role": {
+                "role_id": role_id,
+                "alias": str(role_row["alias"] or "") if role_row else "",
+                "display_name": str(role_row["display_name"] or "") if role_row else "",
+                "personas": int(persona_total),
+            },
+            "last_settled_at": int(settled_row["last_settled_at"]) if settled_row else 0,
             "series": [dict(item) for item in series],
             "groups": [dict(item) for item in groups],
             "personas": [dict(item) for item in personas],

@@ -8,6 +8,19 @@ export function timeAgo(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
+/** 认识多少天（按首次建档时间算，满 24 小时才 +1）。 */
+export function daysSince(ts?: number): number {
+  if (!ts) return 0;
+  return Math.max(0, Math.floor((Date.now() / 1000 - ts) / 86400));
+}
+
+export function fmtDate(ts?: number): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export function fmtTime(ts?: number): string {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
