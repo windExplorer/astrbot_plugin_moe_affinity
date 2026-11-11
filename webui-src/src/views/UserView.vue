@@ -206,7 +206,7 @@ function saved() {
         <span class="pill">{{ snap.stage_label }}</span>
         <span v-if="gapToNext" class="faint">{{ gapToNext }}</span>
         <div class="spacer"></div>
-        <span class="faint">历史最高 {{ snap.peak }} · 本角色第 {{ snap.rank }} 名</span>
+        <span class="faint">历史最高 {{ snap.peak }} · 排名：{{ snap.rank }}</span>
       </div>
       <div class="bar" style="margin-top: 8px; height: 8px">
         <i :style="{ width: ratio + '%' }"></i>
@@ -262,7 +262,7 @@ function saved() {
       <div class="card-h">
         <div class="card-t">签到</div>
         <div class="spacer"></div>
-        <div class="card-s">来自画境拾珍 · 已并入主分数（各角色合计口径），不占每日上限</div>
+        <div class="card-s">来自画境拾珍 · 已计入上方总分（本角色内口径），不占每日上限</div>
       </div>
       <div v-if="checkin && checkin.days > 0" class="row">
         <span class="pill">亲密度 {{ checkin.score }}</span>

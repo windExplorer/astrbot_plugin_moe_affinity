@@ -691,11 +691,18 @@ def test_checkin_sync():
         again = db.snapshot(role_a, "u1", rules, now=base + 120)
         check("重复导入后主分不变", abs(again["score"] - 8.8) < 1e-6, str(again))
 
-        # 签到卡合计 = 各角色合计（两份）
+        # 签到卡合计 = 各角色合计（两份）；角色内口径 = 总分里的签到部分（一份）
         s1 = db.user_source_summaries(source=cs.SOURCE, user_ids=["u1"])["u1"]
         check("签到卡合计 7.6（两份）", abs(s1["score"] - 7.6) < 1e-6, str(s1))
-        last = db.user_source_last(source=cs.SOURCE, user_id="u1")
-        check("连签天数在 evidence 里", cs.streak_from_evidence(last["evidence"]) == 2, str(last))
+        sa1 = db.user_source_summaries(source=cs.SOURCE, user_ids=["u1"], role_id=role_a)["u1"]
+        check("角色内签到分 3.8（总分里的签到部分）", abs(sa1["score"] - 3.8) < 1e-6, str(sa1))
+        check("角色内两天", sa1["days"] == 2, str(sa1))
+        last = db.user_source_last(source=cs.SOURCE, user_id="u1", role_id=role_a)
+        check(
+            "角色内最近事件存在（角色分快照 6.6 -> 8.8）",
+            last is not None and abs(last["after"] - 8.8) < 1e-6 and abs(last["delta"] - 2.2) < 1e-6,
+            str(last),
+        )
 
         # 按需同步：执行 -> 节流 -> 今天已有事件则完全不读
         res = cs.ensure_user_fresh(db, db_path, "u2", rules=rules)

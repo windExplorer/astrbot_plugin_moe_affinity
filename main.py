@@ -351,18 +351,26 @@ class MoeAffinityPlugin(Star):
         except Exception as exc:
             logger.debug(f"[moe_affinity] 签到按需同步跳过: {exc}")
 
-    async def _checkin_view(self, user_id: str) -> dict | None:
-        """用户级签到概况（指令输出 / 注入 / 控制台共用）。"""
+    async def _checkin_view(self, role_id: str, user_id: str) -> dict | None:
+        """本角色内的签到概况（指令明细行 / 注入 / 控制台共用）。
+
+        口径与主分数一致：只统计该角色内的签到事件，score 就是这段关系总分里
+        签到占的那部分；days/streak 也按本角色算。
+        """
         summaries = await asyncio.to_thread(
             self.store.user_source_summaries,
             source=checkin_sync.SOURCE,
             user_ids=[str(user_id)],
+            role_id=role_id,
         )
         summary = summaries.get(str(user_id))
         if not summary:
             return None
         last = await asyncio.to_thread(
-            self.store.user_source_last, source=checkin_sync.SOURCE, user_id=str(user_id)
+            self.store.user_source_last,
+            source=checkin_sync.SOURCE,
+            user_id=str(user_id),
+            role_id=role_id,
         )
         view = dict(summary)
         view["streak"] = checkin_sync.streak_from_evidence((last or {}).get("evidence") or "")
@@ -430,19 +438,20 @@ class MoeAffinityPlugin(Star):
                 gap_to_next = f"（距{next_label}还差 {need}）"
         lines = [
             title,
-            f"{int(snapshot['score'])} 分 · {snapshot['stage_label']}{gap_to_next}",
-            f"本角色第 {snapshot['rank']} 名",
+            f"总分：{int(snapshot['score'])} · {snapshot['stage_label']}{gap_to_next}",
+            f"排名：{snapshot['rank']}",
             f"认识 {days} 天 · 最近互动 {gap}",
         ]
         mood_line = self._mood_line(mood_view)
         if mood_line:
             lines.append(mood_line)
+        # 明细行：按来源逐行展示（签到是第一个来源，未来第三方插件继续往下换行）
         if checkin_view:
             streak = int(checkin_view.get("streak") or 0)
-            streak_text = f"（连签 {streak} 天）" if streak > 0 else ""
+            streak_text = f" · 连签 {streak} 天" if streak > 0 else ""
             lines.append(
-                f"签到亲密度 {checkin_view.get('score', 0)} · "
-                f"累计 {checkin_view.get('days', 0)} 天{streak_text}"
+                f"签到：{checkin_view.get('score', 0)} 分"
+                f" · 累计 {checkin_view.get('days', 0)} 天{streak_text}"
             )
         return "\n".join(lines)
 
@@ -534,7 +543,9 @@ class MoeAffinityPlugin(Star):
                 else None
             )
             checkin_view = (
-                await self._checkin_view(user_id) if self._checkin_cfg()["inject"] else None
+                await self._checkin_view(role_id, user_id)
+                if self._checkin_cfg()["inject"]
+                else None
             )
         except Exception as exc:
             logger.warning(f"[moe_affinity] 读取好感度失败: {exc}")
@@ -653,7 +664,7 @@ class MoeAffinityPlugin(Star):
                 f"{target_name} 与「{alias}」的关系" if alias else f"「{target_name}」的好感度"
             )
             mood_view = await asyncio.to_thread(self._mood_view, role_id)
-            checkin_view = await self._checkin_view(target)
+            checkin_view = await self._checkin_view(role_id, target)
             yield event.plain_result(
                 self._render_detail(
                     snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
@@ -676,7 +687,7 @@ class MoeAffinityPlugin(Star):
         alias = await asyncio.to_thread(self.store.role_alias, role_id)
         title = f"你与「{alias}」的关系" if alias else f"「{name}」的好感度"
         mood_view = await asyncio.to_thread(self._mood_view, role_id)
-        checkin_view = await self._checkin_view(sender)
+        checkin_view = await self._checkin_view(role_id, sender)
         text = self._render_detail(
             snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
         )
@@ -733,7 +744,7 @@ class MoeAffinityPlugin(Star):
         role_id, persona_id = await self._role_for(event)
         snapshot = await asyncio.to_thread(self.store.snapshot, role_id, who, self._rules())
         snapshot.update(role_id=role_id, persona_id=persona_id, read_only=True)
-        snapshot["checkin"] = await self._checkin_view(who)
+        snapshot["checkin"] = await self._checkin_view(role_id, who)
         return json.dumps(snapshot, ensure_ascii=False)
 
     async def terminate(self):

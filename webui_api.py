@@ -246,11 +246,11 @@ async def h_users(plugin) -> dict:
     )
     data["role_id"] = role
     data["missing_names"] = len(plugin.store.users_without_name(1000))
-    # 用户级签到分（来自签到插件同步，与角色无关）：列表直接带出来，一屏看全
+    # 签到列（角色内口径）：与主分数对应，只统计该角色内的签到贡献
     rows = data.get("rows") or []
     if rows:
         summaries = plugin.store.user_source_summaries(
-            source=checkin_sync.SOURCE, user_ids=[r["user_id"] for r in rows]
+            source=checkin_sync.SOURCE, user_ids=[r["user_id"] for r in rows], role_id=role
         )
         for row in rows:
             summary = summaries.get(row["user_id"]) or {}
@@ -268,7 +268,7 @@ async def h_user(plugin) -> dict:
         role, user_id, plugin._rules(), days=_qi("days", 30, 1, 180)
     )
     data["role_id"] = role
-    data["checkin"] = await plugin._checkin_view(user_id)
+    data["checkin"] = await plugin._checkin_view(role, user_id)
     return ok(data)
 
 

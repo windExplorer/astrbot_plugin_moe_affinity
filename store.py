@@ -992,18 +992,29 @@ class AffinityStore:
                 is not None
             )
 
-    def user_source_summaries(self, *, source: str, user_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """按用户聚合某来源流水：分数 / 天数 / 最近一次时间。"""
+    def user_source_summaries(
+        self, *, source: str, user_ids: list[str], role_id: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """按用户聚合某来源流水：分数 / 天数 / 最近一次时间。
+
+        ``role_id`` 传具体角色则只统计该角色内的贡献（= 主分数里该来源的部分，
+        指令明细行 / 控制台签到卡用）；不传则跨角色合计（同步状态卡等全局口径）。
+        """
         uids = sorted({str(u).strip() for u in user_ids if str(u).strip()})
         if not uids:
             return {}
         placeholders = ",".join("?" for _ in uids)
+        where = "source = ?"
+        args: list[Any] = [source]
+        if role_id is not None:
+            where += " AND role_id = ?"
+            args.append(role_id)
         with self._db() as conn:
             rows = conn.execute(
                 f"SELECT user_id, SUM(delta) AS score, COUNT(*) AS days,"
                 f" MAX(created_at) AS last_at FROM events"
-                f" WHERE source = ? AND user_id IN ({placeholders}) GROUP BY user_id",
-                [source, *uids],
+                f" WHERE {where} AND user_id IN ({placeholders}) GROUP BY user_id",
+                [*args, *uids],
             ).fetchall()
         return {
             str(row["user_id"]): {
@@ -1014,13 +1025,20 @@ class AffinityStore:
             for row in rows
         }
 
-    def user_source_last(self, *, source: str, user_id: str) -> dict[str, Any] | None:
-        """某用户该来源最近一条事件（取 evidence 里的连签等信息）。"""
+    def user_source_last(
+        self, *, source: str, user_id: str, role_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """某用户该来源最近一条事件（取 evidence 里的连签等信息）；role_id 同上。"""
+        where = "source = ? AND user_id = ?"
+        args: list[Any] = [source, str(user_id).strip()]
+        if role_id is not None:
+            where += " AND role_id = ?"
+            args.append(role_id)
         with self._db() as conn:
             row = conn.execute(
-                "SELECT delta, before, after, evidence, created_at FROM events"
-                " WHERE source = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
-                (source, str(user_id).strip()),
+                f"SELECT delta, before, after, evidence, created_at FROM events"
+                f" WHERE {where} ORDER BY id DESC LIMIT 1",
+                args,
             ).fetchone()
         return dict(row) if row else None
 
