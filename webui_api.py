@@ -168,6 +168,9 @@ async def h_roles(plugin) -> dict:
         # 否则控制台顶部「暂无角色」，迁移页也选不到导入目标。
         plugin.store.ensure_role("default", "默认人格")
         roles = plugin.store.list_roles()
+    for role in roles:
+        # 使用中 = 已经有分数记录；启动时按人格预建的空壳角色不算
+        role["in_use"] = int(role.get("users") or 0) > 0
     return ok({"items": roles, "total": len(roles)})
 
 
@@ -394,16 +397,22 @@ async def h_roles_personas(plugin) -> dict:
                 alive.add(name)
     except Exception:
         pass
-    names = {item["role_id"]: item["display_name"] for item in plugin.store.list_roles()}
-    items = [
-        {
-            "persona_id": persona_id,
-            "role_id": role_id,
-            "role_name": names.get(role_id, role_id),
-            "persona_exists": persona_id in alive,
-        }
-        for persona_id, role_id in mapping.items()
-    ]
+    roles = {item["role_id"]: item for item in plugin.store.list_roles()}
+    items = []
+    for persona_id, role_id in mapping.items():
+        role = roles.get(role_id) or {}
+        users = int(role.get("users") or 0)
+        items.append(
+            {
+                "persona_id": persona_id,
+                "role_id": role_id,
+                "role_name": role.get("display_name") or role_id,
+                "persona_exists": persona_id in alive,
+                "in_use": users > 0,
+                "users": users,
+                "last_active_at": int(role.get("last_active_at") or 0),
+            }
+        )
     return ok({"items": items, "alive": sorted(alive)})
 
 

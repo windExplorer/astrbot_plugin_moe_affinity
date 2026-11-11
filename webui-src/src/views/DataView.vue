@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { apiMigrateApply, apiMigratePreview, type MigratePreview } from "../api";
+import { apiMigrateApply, apiMigratePreview, apiRoles, type MigratePreview, type RoleRow } from "../api";
 import { app, notify } from "../state";
 import { timeAgo } from "../lib/format";
 
@@ -9,11 +9,26 @@ const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
 const path = ref("");
 const clearMood = ref(true);
+const roles = ref<RoleRow[]>([]);
+const target = ref(app.role || "");
+
+const roleOptions = computed(() =>
+  roles.value.map((role) => ({
+    label: `${role.display_name || role.role_id}${role.in_use ? "" : "（未使用）"}`,
+    value: role.role_id,
+  })),
+);
 
 async function load() {
   busy.value = true;
   try {
-    preview.value = await apiMigratePreview(path.value.trim());
+    const [previewRes, roleRes] = await Promise.all([
+      apiMigratePreview(path.value.trim()),
+      apiRoles().catch(() => ({ items: [] as RoleRow[] })),
+    ]);
+    preview.value = previewRes;
+    roles.value = roleRes.items || [];
+    if (!target.value) target.value = app.role || roles.value[0]?.role_id || "";
     selected.value = new Set(
       (preview.value.items || [])
         .filter((item) => !item.imported && item.target_score > 0)
@@ -39,8 +54,8 @@ function toggleAll() {
 }
 
 async function apply() {
-  if (!app.role) {
-    notify("先在上方选一个角色", true);
+  if (!target.value) {
+    notify("先在上方选一个导入目标角色", true);
     return;
   }
   if (!selected.value.size) {
@@ -50,7 +65,7 @@ async function apply() {
   busy.value = true;
   try {
     const res = await apiMigrateApply({
-      role: app.role,
+      role: target.value,
       user_ids: Array.from(selected.value),
       clear_mood: clearMood.value,
       path: path.value.trim() || undefined,
@@ -75,7 +90,9 @@ const allSelected = computed(() => {
   const pending = (preview.value?.items || []).filter((item) => !item.imported && item.target_score > 0);
   return pending.length > 0 && selected.value.size === pending.length;
 });
-const importTarget = computed(() => app.role || "未选择角色");
+const importTarget = computed(
+  () => roles.value.find((role) => role.role_id === target.value)?.display_name || target.value || "未选择角色",
+);
 
 onMounted(load);
 </script>
@@ -99,6 +116,17 @@ onMounted(load);
         <n-switch v-model:value="clearMood" size="small" />
         <span>顺手把残留心情置为非活跃</span>
       </div>
+    </div>
+
+    <div class="row" style="margin-top: 10px">
+      <span class="muted">导入到</span>
+      <n-select
+        v-model:value="target"
+        :options="roleOptions"
+        style="width: 260px"
+        placeholder="选择目标角色"
+      />
+      <span class="faint">侧栏当前角色：{{ app.role || "未选" }}（可在这里单独指定，含未使用的人格）</span>
     </div>
 
     <n-alert style="margin-top: 12px" :bordered="false" type="default">

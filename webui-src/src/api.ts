@@ -114,6 +114,8 @@ export interface RoleRow {
   created_at: number;
   personas: number;
   users: number;
+  last_active_at: number;
+  in_use: boolean;
 }
 
 export interface StageBucket {
@@ -268,6 +270,9 @@ export interface RolePersonaRow {
   role_id: string;
   role_name: string;
   persona_exists: boolean;
+  in_use: boolean;
+  users: number;
+  last_active_at: number;
 }
 
 export interface MigrateItem {

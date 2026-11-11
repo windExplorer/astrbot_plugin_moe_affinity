@@ -22,12 +22,19 @@ const NAV = [
 const active = computed(() => "/" + (route.path.split("/")[1] || "overview"));
 const title = computed(() => (route.meta.title as string) || "总览");
 
-const roleOptions = computed(() =>
-  app.roles.map((role) => ({
+// 侧栏只列「真的在用」的角色（有分数记录）；一个都没有时回落到全部，
+// 否则新装环境又会出现「暂无角色」。当前选中的角色始终保留，避免选中项凭空消失。
+const roleOptions = computed(() => {
+  const inUse = app.roles.filter((role) => role.in_use);
+  const base = inUse.length ? inUse : app.roles;
+  const list = [...base];
+  const current = app.roles.find((role) => role.role_id === app.role);
+  if (current && !list.some((role) => role.role_id === current.role_id)) list.push(current);
+  return list.map((role) => ({
     label: role.display_name || role.role_id,
     value: role.role_id,
-  })),
-);
+  }));
+});
 
 function onRole(value: string) {
   setRole(value);

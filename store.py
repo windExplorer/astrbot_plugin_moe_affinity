@@ -254,11 +254,18 @@ class AffinityStore:
             return role_id
 
     def list_roles(self) -> list[dict[str, Any]]:
+        """角色列表。
+
+        ``users`` 是「有分数记录的人数」，``last_active_at`` 是最近一次互动时间——
+        控制台用它区分「真的在用的角色」和「启动时按人格预建、但还没聊过的空壳」。
+        """
         with self._db() as conn:
             rows = conn.execute(
                 "SELECT r.role_id, r.display_name, r.created_at,"
                 " (SELECT COUNT(*) FROM role_personas p WHERE p.role_id = r.role_id) AS personas,"
-                " (SELECT COUNT(*) FROM affinities a WHERE a.role_id = r.role_id) AS users"
+                " (SELECT COUNT(*) FROM affinities a WHERE a.role_id = r.role_id) AS users,"
+                " (SELECT COALESCE(MAX(a.last_interaction_at), 0) FROM affinities a"
+                "    WHERE a.role_id = r.role_id) AS last_active_at"
                 " FROM roles r ORDER BY r.created_at ASC"
             ).fetchall()
         return [dict(row) for row in rows]
