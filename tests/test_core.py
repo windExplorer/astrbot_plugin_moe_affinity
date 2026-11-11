@@ -323,6 +323,55 @@ def test_rules_info():
     check("宽限期超 7 天不出空区间", all("11–7" not in text for text in ranges), str(ranges))
 
 
+def test_migration_role_scope():
+    print("[migration/role]")
+    import migrate_self_learning as mig
+
+    check("幂等键带角色", mig.dedupe_key("roleA", "u1") != mig.dedupe_key("roleB", "u1"))
+    check("同一角色键稳定", mig.dedupe_key("roleA", "u1") == mig.dedupe_key("roleA", "u1"))
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_migrole_"))
+    try:
+        db = store.AffinityStore(tmp / "r.db")
+        rules = store.Rules()
+        role_a = db.ensure_role("persona_a")
+        role_b = db.ensure_role("persona_b")
+
+        first = db.apply_event(
+            role_id=role_a, user_id="u1", code=mig.CODE, delta=100,
+            source=mig.SOURCE, rules=rules, dedupe_key=mig.dedupe_key(role_a, "u1"),
+        )
+        second = db.apply_event(
+            role_id=role_b, user_id="u1", code=mig.CODE, delta=100,
+            source=mig.SOURCE, rules=rules, dedupe_key=mig.dedupe_key(role_b, "u1"),
+        )
+        check("第一个人格导入成功", first["status"] == "ok" and first["score"] == 100, str(first))
+        check("第二个人格也能导入同一人", second["status"] == "ok" and second["score"] == 100, str(second))
+
+        repeat = db.apply_event(
+            role_id=role_a, user_id="u1", code=mig.CODE, delta=100,
+            source=mig.SOURCE, rules=rules, dedupe_key=mig.dedupe_key(role_a, "u1"),
+        )
+        check("同一角色重复导入被去重", repeat["status"] == "duplicate", str(repeat))
+
+        imported_a = db.imported_user_ids(mig.role_prefix(role_a))
+        imported_b = db.imported_user_ids(mig.role_prefix(role_b))
+        check("角色 A 已导入名单", imported_a == {"u1"}, str(imported_a))
+        check("角色 B 已导入名单独立", imported_b == {"u1"}, str(imported_b))
+
+        # 旧版全局键（不带角色）只能靠事件行的 role_id 归属
+        db.apply_event(
+            role_id=role_a, user_id="u9", code=mig.CODE, delta=50,
+            source=mig.SOURCE, rules=rules, dedupe_key="import:self_learning:u9",
+        )
+        legacy_a = db.legacy_imported_user_ids(role_a)
+        legacy_b = db.legacy_imported_user_ids(role_b)
+        check("旧键归到当初导入的角色", legacy_a == {"u9"}, str(legacy_a))
+        check("旧键不会串到另一个角色", legacy_b == set(), str(legacy_b))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_migration():
     print("[migration]")
     import sqlite3
@@ -392,6 +441,7 @@ def main():
     test_console_queries()
     test_mood()
     test_rules_info()
+    test_migration_role_scope()
     test_migration()
     print()
     if FAILED:

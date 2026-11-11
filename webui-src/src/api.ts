@@ -291,6 +291,7 @@ export interface MigrateItem {
 export interface MigratePreview {
   exists: boolean;
   db_path: string;
+  role_id: string;
   items: MigrateItem[];
   totals: { users: number; pending: number; imported: number };
   message: string;
@@ -355,8 +356,13 @@ export const apiRenameRole = (role_id: string, name: string) =>
   apiPost<{ role_id: string; name: string }>("/roles/rename", { role_id, name });
 export const apiMergeRoles = (target: string, source: string) =>
   apiPost<{ status: string; moved: number; merged: number }>("/roles/merge", { target, source });
-export const apiMigratePreview = (path = "") =>
-  apiGet<MigratePreview>(`/migrate/preview${path ? `?path=${encodeURIComponent(path)}` : ""}`, 60000);
+export const apiMigratePreview = (path = "", role = "") => {
+  const p = new URLSearchParams();
+  if (path) p.set("path", path);
+  if (role) p.set("role", role);
+  const qs = p.toString();
+  return apiGet<MigratePreview>(`/migrate/preview${qs ? `?${qs}` : ""}`, 60000);
+};
 export const apiMigrateApply = (body: {
   role: string;
   user_ids?: string[];

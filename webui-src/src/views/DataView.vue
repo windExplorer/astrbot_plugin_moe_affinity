@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { apiMigrateApply, apiMigratePreview, apiRoles, type MigratePreview, type RoleRow } from "../api";
 import { app, notify } from "../state";
 import { timeAgo } from "../lib/format";
@@ -22,24 +22,39 @@ const roleOptions = computed(() =>
 async function load() {
   busy.value = true;
   try {
-    const [previewRes, roleRes] = await Promise.all([
-      apiMigratePreview(path.value.trim()),
-      apiRoles().catch(() => ({ items: [] as RoleRow[] })),
-    ]);
-    preview.value = previewRes;
+    const roleRes = await apiRoles().catch(() => ({ items: [] as RoleRow[] }));
     roles.value = roleRes.items || [];
-    if (!target.value) target.value = app.role || roles.value[0]?.role_id || "";
-    selected.value = new Set(
-      (preview.value.items || [])
-        .filter((item) => !item.imported && item.target_score > 0)
-        .map((item) => item.user_id),
-    );
+    if (!target.value || !roles.value.some((role) => role.role_id === target.value)) {
+      target.value = app.role || roles.value[0]?.role_id || "";
+    }
+    await reloadPreview();
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
     busy.value = false;
   }
 }
+
+/** 只重读预览：幂等状态是按「角色」算的，切换导入目标必须重新算一遍。 */
+async function reloadPreview() {
+  if (!target.value) return;
+  const res = await apiMigratePreview(path.value.trim(), target.value);
+  preview.value = res;
+  selected.value = new Set(
+    (res.items || [])
+      .filter((item) => !item.imported && item.target_score > 0)
+      .map((item) => item.user_id),
+  );
+}
+
+watch(target, () => {
+  busy.value = true;
+  reloadPreview()
+    .catch((e: any) => notify(e?.message || String(e), true))
+    .finally(() => {
+      busy.value = false;
+    });
+});
 
 function toggle(userId: string) {
   if (selected.value.has(userId)) selected.value.delete(userId);
@@ -130,8 +145,13 @@ onMounted(load);
     </div>
 
     <n-alert style="margin-top: 12px" :bordered="false" type="default">
-      {{ preview?.message || "同一用户多个群各有一条记录，导入时取最高那条；分数按比例换算到本插件上限。" }}
+      {{ preview?.message || "同一用户多个群各有一条记录，导入时取最高那条；分数按比例换算（老库满分对应 1000 分）。" }}
       <span v-if="preview?.db_path" class="faint"> · 来源 {{ preview.db_path }}</span>
+    </n-alert>
+
+    <n-alert style="margin-top: 8px" :bordered="false" type="info">
+      导入是<b>按角色记的</b>：同一个人可以分别导入到每个角色，每个角色只需导入一次。
+      切换上面的「导入到」会重新计算该角色的待导入列表。
     </n-alert>
   </div>
 

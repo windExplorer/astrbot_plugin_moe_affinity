@@ -700,17 +700,46 @@ class AffinityStore:
         return [dict(row) for row in rows]
 
     def imported_user_ids(self, prefix: str) -> set[str]:
-        """已导入过的 user_id（dedupe_key 形如 ``<prefix><user_id>``）。"""
+        """已导入过的 user_id（dedupe_key 形如 ``<prefix><user_id>``）。
+
+        ``source`` 取 key 的前两段（``import:self_learning:``），
+        因为前缀里还夹着角色 id，不能直接拿整串当 source。
+        """
+        source = ":".join(prefix.split(":")[:2])
         with self._db() as conn:
             rows = conn.execute(
                 "SELECT dedupe_key FROM events WHERE source = ? AND dedupe_key LIKE ?",
-                (prefix.rstrip(":"), prefix + "%"),
+                (source, prefix + "%"),
             ).fetchall()
         return {
             str(row["dedupe_key"])[len(prefix):]
             for row in rows
             if row["dedupe_key"]
         }
+
+    def legacy_imported_user_ids(self, role_id: str, source: str = "import:self_learning") -> set[str]:
+        """兼容 v0.7.3 之前的全局幂等键 ``<source>:<user_id>``。
+
+        旧版 key 里没有角色，所以只能靠事件行的 ``role_id`` 判断它当初导进了哪个角色；
+        否则升级后会把已经导入过的角色重新判成「待导入」，再导一次就把分数翻倍了。
+        """
+        prefix = f"{source}:"
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT dedupe_key FROM events WHERE source = ? AND role_id = ?"
+                " AND dedupe_key LIKE ?",
+                (source, role_id, prefix + "%"),
+            ).fetchall()
+        out: set[str] = set()
+        for row in rows:
+            key = str(row["dedupe_key"] or "")
+            if not key.startswith(prefix):
+                continue
+            rest = key[len(prefix):]
+            if ":" in rest:  # 新格式（带角色），交给 imported_user_ids 处理
+                continue
+            out.add(rest)
+        return out
 
     def _settle_role(self, conn: sqlite3.Connection, role_id: str, rules: Rules, now: int) -> None:
         rows = conn.execute(

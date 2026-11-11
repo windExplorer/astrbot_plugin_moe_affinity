@@ -23,6 +23,19 @@ CODE = "import.seed"
 DEDUPE_PREFIX = f"{SOURCE}:"
 
 
+def role_prefix(role_id: str) -> str:
+    """某个角色的导入幂等键前缀。
+
+    **必须带角色**：老数据是「一个用户一份」，但我们这边是「角色 × 用户」，
+    同一个人要分别导入到每个角色里。如果全局去重，导入第二个人格时会被判成「已导入」。
+    """
+    return f"{DEDUPE_PREFIX}{role_id}:"
+
+
+def dedupe_key(role_id: str, user_id: str) -> str:
+    return f"{role_prefix(role_id)}{user_id}"
+
+
 def resolve_db_path(explicit: str | None, default_dir: Path | None) -> Path | None:
     """定位老库文件：显式路径优先，其次插件数据目录下的 messages.db。"""
     if explicit:

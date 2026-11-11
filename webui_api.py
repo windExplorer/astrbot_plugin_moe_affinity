@@ -173,11 +173,28 @@ async def _bound_personas(plugin) -> dict[str, int]:
         conversations = await manager.get_conversations()
     except Exception as exc:
         logger.debug(f"[moe_affinity] 读取会话绑定失败（按无绑定处理）: {exc}")
-        return counts
+        conversations = []
     for conversation in conversations or []:
         persona_id = str(getattr(conversation, "persona_id", "") or "").strip()
         if persona_id:
             counts[persona_id] = counts.get(persona_id, 0) + 1
+
+    # 还有一类没写进 conversation：umo 级的强制人格（session_service_config.persona_id）。
+    # 这种会话的 conversation.persona_id 可能是空的，只看会话会漏掉它。
+    try:
+        from astrbot.api import sp
+
+        prefs = await sp.session_get(None, "session_service_config")
+        for pref in prefs or []:
+            value = getattr(pref, "value", None)
+            config = value.get("val") if isinstance(value, dict) else None
+            if not isinstance(config, dict):
+                continue
+            persona_id = str(config.get("persona_id") or "").strip()
+            if persona_id:
+                counts[persona_id] = counts.get(persona_id, 0) + 1
+    except Exception as exc:
+        logger.debug(f"[moe_affinity] 读取会话级人格覆盖失败（忽略）: {exc}")
     return counts
 
 
@@ -498,6 +515,7 @@ def _legacy_db_path(plugin, explicit: str | None = None) -> Path | None:
 
 async def h_migrate_preview(plugin) -> dict:
     path = _legacy_db_path(plugin, _q("path"))
+    role = _resolve_role(plugin, _q("role"))
     if path is None:
         return ok(
             {
@@ -521,7 +539,10 @@ async def h_migrate_preview(plugin) -> dict:
             }
         )
     plan = migrate_self_learning.build_plan(legacy)
-    imported = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
+    # 幂等键按角色隔离：同一个人可以分别导入到每个角色
+    imported = plugin.store.imported_user_ids(migrate_self_learning.role_prefix(role))
+    # 兼容旧版全局键，避免升级后把已导入的角色重新导一遍导致分数翻倍
+    imported |= plugin.store.legacy_imported_user_ids(role)
     for item in plan:
         item["imported"] = item["user_id"] in imported
     pending = sum(1 for item in plan if not item["imported"])
@@ -529,6 +550,7 @@ async def h_migrate_preview(plugin) -> dict:
         {
             "exists": True,
             "db_path": str(path),
+            "role_id": role,
             "items": plan,
             "totals": {"users": len(plan), "pending": pending, "imported": len(plan) - pending},
             "message": "",
@@ -549,7 +571,8 @@ async def h_migrate_apply(plugin) -> dict:
     except Exception as exc:
         return err(f"读取老库失败: {exc}")
     plan = migrate_self_learning.build_plan(legacy)
-    imported_ids = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
+    imported_ids = plugin.store.imported_user_ids(migrate_self_learning.role_prefix(role))
+    imported_ids |= plugin.store.legacy_imported_user_ids(role)
     imported = skipped = 0
     errors: list[str] = []
     for item in plan:
@@ -571,7 +594,7 @@ async def h_migrate_apply(plugin) -> dict:
                 source=migrate_self_learning.SOURCE,
                 rules=plugin._rules(),
                 evidence=migrate_self_learning.evidence_json(item),
-                dedupe_key=f"{migrate_self_learning.DEDUPE_PREFIX}{user_id}",
+                dedupe_key=migrate_self_learning.dedupe_key(role, user_id),
                 operator="migrate",
             )
             imported += 1
