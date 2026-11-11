@@ -214,3 +214,8 @@ webui-src/src/version.ts
 # Vite temp config bundles
 webui-src/vite.config.ts.timestamp-*
 
+
+# 前端 src/lib 是源码，不是 Python 打包产物（顶层 lib/ 规则会误伤）
+!webui-src/src/lib/
+!webui-src/src/lib/**
+
