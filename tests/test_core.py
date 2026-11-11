@@ -173,12 +173,69 @@ def test_store():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_console_queries():
+    print("[console]")
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_console_"))
+    try:
+        db = store.AffinityStore(tmp / "c.db")
+        rules = store.Rules()
+        noon = int(datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp())
+        role = db.ensure_role("p1", "人格1")
+
+        db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=10, rules=rules,
+                       group_id="100", is_group=True, display_name="小明", now=noon)
+        db.apply_event(role_id=role, user_id="u2", code="chat.message", delta=40, rules=rules,
+                       group_id="100", is_group=True, display_name="小红", now=noon)
+        db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=20, rules=rules,
+                       group_id="200", is_group=True, now=noon + 120)
+        db.apply_event(role_id=role, user_id="u1", code="manual.adjust", delta=-5,
+                       source="manual", rules=rules, operator="admin",
+                       evidence="测试", now=noon + 240)
+
+        db.upsert_groups({"100": "测试群", "200": "二群"})
+        groups = db.group_rows(role, rules)
+        names = {g["group_id"]: g["group_name"] for g in groups}
+        check("群列表两条", len(groups) == 2, str(groups))
+        check("群名已补", names.get("100") == "测试群", str(names))
+        # u2 要求的 +40 被每日上限夹到 +30，所以群 100 合计 10 + 30 = 40
+        check("群贡献合计 40", {g["group_id"]: g["delta"] for g in groups}["100"] == 40, str(groups))
+
+        found = db.list_users(role, rules, q="小红")
+        check("按昵称搜索", found["total"] == 1 and found["rows"][0]["user_id"] == "u2", str(found))
+        ordered = db.list_users(role, rules, sort="score")
+        check("列表按分数降序", ordered["rows"][0]["user_id"] == "u2", str(ordered["rows"]))
+        paged = db.list_users(role, rules, page=2, size=1)
+        check("分页 size=1 第二页 1 条", len(paged["rows"]) == 1 and paged["total"] == 2, str(paged))
+        filtered = db.list_users(role, rules, stage="stranger")
+        check("按档位过滤", filtered["total"] == 2, str(filtered))
+
+        view = db.overview(role, rules, days=7, now=noon + 300)
+        check("总览人数", view["totals"]["users"] == 2, str(view["totals"]))
+        # u1 = 10 + 20 - 5 = 25，u2 被上限夹到 30 → 平均 27.5
+        check("总览平均分 27.5", view["totals"]["avg_score"] == 27.5, str(view["totals"]))
+        check("总览事件数 4", view["totals"]["events_7d"] == 4, str(view["totals"]))
+        check("趋势有数据", len(view["trend"]) >= 1, str(view["trend"]))
+        check("Top 有值", view["top"][0]["user_id"] == "u2", str(view["top"]))
+
+        detail = db.user_detail(role, "u1", rules, days=7, now=noon + 300)
+        check("详情可读", detail["status"] == "ok", str(detail.get("status")))
+        check("详情两个群", len(detail["groups"]) == 2, str(detail["groups"]))
+        check("详情群贡献合计 30", detail["group_delta_total"] == 30, str(detail["group_delta_total"]))
+        check("详情流水 3 条", len(detail["events"]) == 3, str(len(detail["events"])))
+
+        audit = db.audit_rows()
+        check("审计记录手动事件", audit["total"] == 1 and audit["rows"][0]["operator"] == "admin", str(audit))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_schema()
     test_stage()
     test_decay()
     test_scoring()
     test_store()
+    test_console_queries()
     print()
     if FAILED:
         print(f"RESULT: FAIL ({len(FAILED)}): " + ", ".join(FAILED))

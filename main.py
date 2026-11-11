@@ -18,7 +18,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import personas, scoring, store
+from . import personas, scoring, store, webui_api
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 PLUGIN_VERSION = "v0.2.0"  # 与 metadata.yaml 同步
@@ -29,7 +29,7 @@ SKIP_SCORING = "moe_affinity_skip_scoring"
 
 def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
-    for module in (store, scoring, personas):
+    for module in (store, scoring, personas, webui_api):
         try:
             importlib.reload(module)
         except Exception as exc:  # 重载失败不应让插件装不上
@@ -117,9 +117,17 @@ class MoeAffinityPlugin(Star):
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self.store = store.AffinityStore(self.data_dir / "affinity.db")
         self.api = AffinityApi(self)
+        self.plugin_version = PLUGIN_VERSION
         logger.info(
             f"[moe_affinity] 已装载 {PLUGIN_VERSION}，数据目录 {self.data_dir}"
         )
+
+    async def initialize(self) -> None:
+        """注册控制台路由；失败只记日志，不影响插件本体。"""
+        try:
+            webui_api.register_apis(self)
+        except Exception as exc:
+            logger.error(f"[moe_affinity] 控制台路由注册失败: {exc}")
 
     # ------------------------------------------------------------------ 配置
     def _section(self, name: str) -> dict:

@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS affinities (
 );
 CREATE INDEX IF NOT EXISTS idx_affinities_role_score ON affinities(role_id, score DESC);
 
+CREATE TABLE IF NOT EXISTS groups (
+    group_id    TEXT PRIMARY KEY,
+    name        TEXT NOT NULL DEFAULT '',
+    updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     role_id     TEXT NOT NULL,
@@ -607,6 +613,310 @@ class AffinityStore:
             evidence=reason,
             display_name=str(current.get("display_name") or ""),
         )
+
+    # ------------------------------------------------------------------ 控制台
+    def upsert_groups(self, mapping: dict[str, str]) -> int:
+        """群号 → 群名（由协议端同步写入）。"""
+        if not mapping:
+            return 0
+        now = int(time.time())
+        with self._db() as conn:
+            for gid, name in mapping.items():
+                conn.execute(
+                    "INSERT INTO groups(group_id, name, updated_at) VALUES(?,?,?)"
+                    " ON CONFLICT(group_id) DO UPDATE SET name = excluded.name,"
+                    " updated_at = excluded.updated_at",
+                    (str(gid), str(name or ""), now),
+                )
+        return len(mapping)
+
+    def _settle_role(self, conn: sqlite3.Connection, role_id: str, rules: Rules, now: int) -> None:
+        rows = conn.execute(
+            "SELECT user_id, score, last_settled_at FROM affinities WHERE role_id = ?", (role_id,)
+        ).fetchall()
+        for row in rows:
+            settled, decayed, settled_at = self._settle(
+                float(row["score"]), int(row["last_settled_at"]), now, rules
+            )
+            if decayed:
+                conn.execute(
+                    "UPDATE affinities SET score = ?, last_settled_at = ?"
+                    " WHERE role_id = ? AND user_id = ?",
+                    (settled, settled_at, role_id, row["user_id"]),
+                )
+
+    def list_users(
+        self,
+        role_id: str,
+        rules: Rules,
+        *,
+        q: str = "",
+        stage: str = "",
+        sort: str = "score",
+        page: int = 1,
+        size: int = 50,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        moment = int(now if now is not None else time.time())
+        size = max(1, min(200, int(size)))
+        page = max(1, int(page))
+        order = {
+            "score": "score DESC, last_interaction_at DESC",
+            "recent": "last_interaction_at DESC, score DESC",
+            "name": "display_name ASC, user_id ASC",
+        }.get(sort, "score DESC, last_interaction_at DESC")
+        where = "role_id = ?"
+        args: list[Any] = [role_id]
+        if q:
+            where += " AND (user_id LIKE ? OR display_name LIKE ?)"
+            args += [f"%{q}%", f"%{q}%"]
+        with self._db() as conn:
+            self._settle_role(conn, role_id, rules, moment)
+            rows = conn.execute(
+                f"SELECT user_id, display_name, platform, score, first_seen_at,"
+                f" last_interaction_at FROM affinities WHERE {where} ORDER BY {order}",
+                args,
+            ).fetchall()
+            if stage:
+                rows = [
+                    row
+                    for row in rows
+                    if stage_of(float(row["score"]), rules.max_score)[0] == stage
+                ]
+            total = len(rows)
+            picked = rows[(page - 1) * size: page * size]
+        items = []
+        for index, row in enumerate(picked, start=(page - 1) * size + 1):
+            key, label = stage_of(float(row["score"]), rules.max_score)
+            items.append(
+                {
+                    "rank": index,
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"],
+                    "platform": row["platform"],
+                    "score": round(float(row["score"]), 1),
+                    "stage": key,
+                    "stage_label": label,
+                    "first_seen_at": int(row["first_seen_at"]),
+                    "last_interaction_at": int(row["last_interaction_at"]),
+                }
+            )
+        return {"total": total, "rows": items, "page": page, "size": size}
+
+    def overview(self, role_id: str, rules: Rules, *, days: int = 30, now: int | None = None) -> dict:
+        moment = int(now if now is not None else time.time())
+        days = max(1, min(180, int(days)))
+        start = day_start(moment) - (days - 1) * 86400
+        with self._db() as conn:
+            self._settle_role(conn, role_id, rules, moment)
+            rows = conn.execute(
+                "SELECT score, last_interaction_at FROM affinities WHERE role_id = ?", (role_id,)
+            ).fetchall()
+            stages = []
+            for edge, key, label in reversed(STAGE_TABLE):
+                count = sum(
+                    1
+                    for row in rows
+                    if stage_of(float(row["score"]), rules.max_score)[0] == key
+                )
+                stages.append({"key": key, "label": label, "count": count, "edge": edge})
+            total_users = len(rows)
+            avg = round(sum(float(r["score"]) for r in rows) / total_users, 1) if total_users else 0.0
+            active_today = sum(1 for r in rows if int(r["last_interaction_at"]) >= day_start(moment))
+            active_7d = sum(1 for r in rows if int(r["last_interaction_at"]) >= moment - 7 * 86400)
+            trend = conn.execute(
+                "SELECT date(created_at, 'unixepoch', 'localtime') AS day,"
+                " COUNT(*) AS events,"
+                " SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END) AS gain,"
+                " SUM(CASE WHEN delta < 0 THEN delta ELSE 0 END) AS loss,"
+                " COUNT(DISTINCT user_id) AS users"
+                " FROM events WHERE role_id = ? AND created_at >= ?"
+                " GROUP BY day ORDER BY day ASC",
+                (role_id, start),
+            ).fetchall()
+            top = conn.execute(
+                "SELECT user_id, display_name, score FROM affinities WHERE role_id = ?"
+                " ORDER BY score DESC, last_interaction_at DESC LIMIT 5",
+                (role_id,),
+            ).fetchall()
+            recent = conn.execute(
+                "SELECT e.code, e.delta, e.user_id, a.display_name AS name, e.created_at,"
+                " g.name AS group_name"
+                " FROM events e"
+                " LEFT JOIN affinities a ON a.role_id = e.role_id AND a.user_id = e.user_id"
+                " LEFT JOIN groups g ON g.group_id = e.group_id"
+                " WHERE e.role_id = ? ORDER BY e.id DESC LIMIT 12",
+                (role_id,),
+            ).fetchall()
+            today_events = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE role_id = ? AND created_at >= ?",
+                (role_id, day_start(moment)),
+            ).fetchone()["c"]
+            week_events = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE role_id = ? AND created_at >= ?",
+                (role_id, moment - 7 * 86400),
+            ).fetchone()["c"]
+        return {
+            "role_id": role_id,
+            "days": days,
+            "max_score": rules.max_score,
+            "totals": {
+                "users": total_users,
+                "avg_score": avg,
+                "active_today": active_today,
+                "active_7d": active_7d,
+                "events_today": int(today_events),
+                "events_7d": int(week_events),
+            },
+            "stages": stages,
+            "trend": [dict(row) for row in trend],
+            "top": [
+                {
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"],
+                    "score": round(float(row["score"]), 1),
+                }
+                for row in top
+            ],
+            "recent": [dict(row) for row in recent],
+        }
+
+    def user_detail(
+        self, role_id: str, user_id: str, rules: Rules, *, days: int = 30, now: int | None = None
+    ) -> dict:
+        moment = int(now if now is not None else time.time())
+        days = max(1, min(180, int(days)))
+        start = day_start(moment) - (days - 1) * 86400
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT score, last_settled_at FROM affinities WHERE role_id = ? AND user_id = ?",
+                (role_id, user_id),
+            ).fetchone()
+            if row is not None:
+                settled, decayed, settled_at = self._settle(
+                    float(row["score"]), int(row["last_settled_at"]), moment, rules
+                )
+                if decayed:
+                    conn.execute(
+                        "UPDATE affinities SET score = ?, last_settled_at = ?"
+                        " WHERE role_id = ? AND user_id = ?",
+                        (settled, settled_at, role_id, user_id),
+                    )
+            snapshot = self._snapshot_row(conn, role_id, user_id, rules, moment)
+            if snapshot.get("status") != "ok":
+                return {"status": "not_recorded", "snapshot": snapshot}
+            series = conn.execute(
+                "SELECT date(created_at, 'unixepoch', 'localtime') AS day,"
+                " SUM(delta) AS delta, COUNT(*) AS events"
+                " FROM events WHERE role_id = ? AND user_id = ? AND created_at >= ?"
+                " GROUP BY day ORDER BY day ASC",
+                (role_id, user_id, start),
+            ).fetchall()
+            groups = conn.execute(
+                "SELECT e.group_id, g.name AS group_name, SUM(e.delta) AS delta,"
+                " COUNT(*) AS events, MAX(e.created_at) AS last_at"
+                " FROM events e LEFT JOIN groups g ON g.group_id = e.group_id"
+                " WHERE e.role_id = ? AND e.user_id = ? AND e.group_id <> ''"
+                " GROUP BY e.group_id ORDER BY delta DESC",
+                (role_id, user_id),
+            ).fetchall()
+            events = conn.execute(
+                "SELECT e.id, e.code, e.delta, e.before, e.after, e.source, e.operator,"
+                " e.evidence, e.group_id, e.created_at, g.name AS group_name"
+                " FROM events e LEFT JOIN groups g ON g.group_id = e.group_id"
+                " WHERE e.role_id = ? AND e.user_id = ? ORDER BY e.id DESC LIMIT 50",
+                (role_id, user_id),
+            ).fetchall()
+            total_delta = conn.execute(
+                "SELECT COALESCE(SUM(delta), 0) AS s FROM events"
+                " WHERE role_id = ? AND user_id = ? AND group_id <> ''",
+                (role_id, user_id),
+            ).fetchone()["s"]
+        return {
+            "status": "ok",
+            "snapshot": snapshot,
+            "series": [dict(item) for item in series],
+            "groups": [dict(item) for item in groups],
+            "events": [dict(item) for item in events],
+            "group_delta_total": round(float(total_delta), 1),
+        }
+
+    def group_rows(self, role_id: str, rules: Rules, *, now: int | None = None) -> list[dict]:
+        moment = int(now if now is not None else time.time())
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT e.group_id, g.name AS group_name, SUM(e.delta) AS delta,"
+                " COUNT(*) AS events, COUNT(DISTINCT e.user_id) AS users,"
+                " MAX(e.created_at) AS last_at"
+                " FROM events e LEFT JOIN groups g ON g.group_id = e.group_id"
+                " WHERE e.role_id = ? AND e.group_id <> ''"
+                " GROUP BY e.group_id ORDER BY last_at DESC",
+                (role_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def group_detail(
+        self, role_id: str, group_id: str, rules: Rules, *, now: int | None = None
+    ) -> dict:
+        moment = int(now if now is not None else time.time())
+        with self._db() as conn:
+            self._settle_role(conn, role_id, rules, moment)
+            name_row = conn.execute(
+                "SELECT name FROM groups WHERE group_id = ?", (group_id,)
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT e.user_id, a.display_name, a.score, a.last_interaction_at,"
+                " SUM(e.delta) AS delta, COUNT(*) AS events"
+                " FROM events e LEFT JOIN affinities a"
+                "   ON a.role_id = e.role_id AND a.user_id = e.user_id"
+                " WHERE e.role_id = ? AND e.group_id = ?"
+                " GROUP BY e.user_id ORDER BY delta DESC",
+                (role_id, group_id),
+            ).fetchall()
+            trend = conn.execute(
+                "SELECT date(created_at, 'unixepoch', 'localtime') AS day,"
+                " SUM(delta) AS delta, COUNT(*) AS events, COUNT(DISTINCT user_id) AS users"
+                " FROM events WHERE role_id = ? AND group_id = ?"
+                " GROUP BY day ORDER BY day DESC LIMIT 30",
+                (role_id, group_id),
+            ).fetchall()
+        items = []
+        for row in rows:
+            key, label = stage_of(float(row["score"] or 0), rules.max_score)
+            items.append(
+                {
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"] or "",
+                    "score": round(float(row["score"] or 0), 1),
+                    "stage": key,
+                    "stage_label": label,
+                    "last_interaction_at": int(row["last_interaction_at"] or 0),
+                    "group_delta": round(float(row["delta"] or 0), 1),
+                    "events": int(row["events"]),
+                }
+            )
+        return {
+            "group_id": group_id,
+            "group_name": name_row["name"] if name_row else "",
+            "rows": items,
+            "trend": list(reversed([dict(item) for item in trend])),
+        }
+
+    def audit_rows(self, *, page: int = 1, size: int = 50) -> dict:
+        size = max(1, min(200, int(size)))
+        page = max(1, int(page))
+        with self._db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE source IN ('manual','merge','import')"
+            ).fetchone()["c"]
+            rows = conn.execute(
+                "SELECT id, role_id, user_id, code, delta, before, after, source, operator,"
+                " evidence, created_at FROM events"
+                " WHERE source IN ('manual','merge','import')"
+                " ORDER BY id DESC LIMIT ? OFFSET ?",
+                (size, (page - 1) * size),
+            ).fetchall()
+        return {"total": int(total), "rows": [dict(row) for row in rows], "page": page, "size": size}
 
     def ping(self) -> bool:
         try:

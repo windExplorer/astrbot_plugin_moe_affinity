@@ -1,5 +1,51 @@
 # 更新日志
 
+## v0.3.0 (2026-11-11)
+
+新增 WebUI 控制台：用户 / 群聊 / 排行 / 总览图表 / 配置 / 审计，可直接在面板上改分。
+
+**新增后端（`webui_api.py`）**
+
+- 15 条桥接路由，统一 `{status, data|message}` 信封（AstrBot 插件页约定）：
+  `ping / roles / overview / users / user / groups / group / groups/sync / rank / audit /
+  config(GET/POST) / score / reset / conflicts`。
+- 路由一律用查询参数传 id（`/user?id=123`），不依赖路径参数——桥接层在各版本对路径参数的处理不一致。
+- `/score` 与 `/reset` 都走 `apply_event(source="manual")`，写 `operator` 与原因，**不直接 UPDATE 分数**，
+  因此审计、曲线、撤销全部自动成立；管理员调整不受每日上限约束。
+- `/config` 按 `_conf_schema.json` 摊平成点号键（`affinity.max_score`），
+  写入时按 schema 类型转换并校验 `options`，落盘走 `save_config()`。
+- `/groups/sync` 通过 aiocqhttp 的 `get_group_list` 补群名（失败不影响控制台）。
+- `/conflicts` 读自我学习插件的五个开关，提示是否仍有两套好感度在跑。
+
+**新增存储查询（`store.py`）**
+
+- `groups` 表 + `upsert_groups`；`list_users`（搜索/档位/排序/分页）、`overview`
+  （KPI、档位分布、按天趋势、Top5、最近变动）、`user_detail`（快照、按天曲线、
+  群贡献分解、事件流水）、`group_rows` / `group_detail`、`audit_rows`。
+- 列表与总览读取前先对整角色做一次惰性结算，避免长期不活跃者的旧分数霸榜。
+
+**新增前端（`webui-src/` → `pages/affinity-console/`）**
+
+- Vue3 + vue-router（hash）+ ECharts，无组件库依赖（自写设计系统与深/浅色变量）。
+- 路由：`#/overview` `#/users` `#/users/:id` `#/groups` `#/groups/:id` `#/rank` `#/config` `#/audit`，
+  **筛选/分页/时间窗全部写进 URL**，刷新和分享链接都能回到同一视图（不再刷新即回首页）。
+- 总览：4 个 KPI + 关系分布环图 + 互动趋势（柱=次数、线=净增分）+ Top5 + 最近变动。
+- 用户详情：分数条、档位、历史最高、排名、认识天数、按天变动、群贡献分解、事件流水、
+  内嵌「调整分数 / 清零」弹窗。
+- 群详情：本群趋势 + 成员榜（全局分数与本群贡献并列，点进个人）。
+- 配置页：schema 驱动分组表单（总开关/数值/计分/注入/高级），含冲突检测提示。
+- 构建约束沿用 `moe_permission`：`base:'./'`、单 chunk、CSS 内联、hash 路由、assetsInlineLimit 300KB、
+  一律走 `window.AstrBotPluginPage` 桥接（禁用 localStorage，sandbox iframe 会抛 SecurityError）。
+- `build_webui.ps1` 从 `metadata.yaml` 注入版本号；`metadata.yaml` 注册 `pages: affinity-console`。
+
+**其它**
+
+- `_reload_sibling_modules` 增加 `webui_api`；`build_zip.ps1` 的 `$includeList` 增加
+  `webui_api.py` 与 `pages`。
+- `tests/test_core.py` 增加控制台查询断言（群贡献、搜索、分页、档位过滤、总览均值、详情、审计）。
+
+版本 v0.2.0 -> v0.3.0。
+
 ## v0.2.0 (2026-11-11)
 
 第一个可用版本：数据层、计分、注入、指令、跨插件契约全部落地（WebUI 控制台尚未实现）。
