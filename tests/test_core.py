@@ -747,6 +747,52 @@ def test_checkin_sync():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_backdate_and_rebuild():
+    print("[backdate]")
+    import sqlite3
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_bd_"))
+    try:
+        db = store.AffinityStore(tmp / "bd.db")
+        rules = store.Rules()
+        role = db.ensure_role("p3")
+        now0 = 10 * 86400  # 「今天」：第 10 天
+        # +25 避免撞每日涨分上限（30）
+        db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=25,
+                       rules=rules, now=now0)
+
+        # 模拟 v0.12.2 事故：回填一条 5 天前的事件
+        back = db.apply_event(role_id=role, user_id="u1", code="checkin.checkin",
+                              delta=1, source="checkin", rules=rules,
+                              dedupe_key="checkin:p3:u1:old", now=now0 - 5 * 86400)
+        check("回填历史事件只加分不衰减", back["score"] == 26, str(back))
+        snap = db.snapshot(role, "u1", rules, now=now0 + 60)
+        check("结算点未被回拨（之后结算不再误扣）", snap["score"] == 26, str(snap))
+        check("最近互动未被回拨", snap["last_interaction_at"] == now0, str(snap["last_interaction_at"]))
+
+        # 一次性重建：把「已被误扣的分数」按流水还原（清除 meta 标记模拟升级前状态）
+        conn = sqlite3.connect(db.db_path)
+        try:
+            conn.execute("UPDATE affinities SET score = 5 WHERE user_id = 'u1'")
+            conn.execute("DELETE FROM meta WHERE key = 'score_rebuild_v1'")
+            conn.commit()
+        finally:
+            conn.close()
+        db2 = store.AffinityStore(db.db_path)  # 重开触发重建
+        fixed = db2.snapshot(role, "u1", rules, now=now0 + 120)
+        check("重建还原 Σdelta (26)", fixed["score"] == 26, str(fixed))
+        check("重建保留历史最高", fixed["peak"] == 26, str(fixed["peak"]))
+        check("重建还原最近互动", fixed["last_interaction_at"] == now0, str(fixed["last_interaction_at"]))
+        marked = db2._db and True
+        with db2._db() as conn2:
+            done = conn2.execute(
+                "SELECT value FROM meta WHERE key = 'score_rebuild_v1'"
+            ).fetchone()
+        check("重建标记已写回", done is not None, str(done))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_schema()
     test_stage()
@@ -763,6 +809,7 @@ def main():
     test_migration_role_scope()
     test_migration()
     test_checkin_sync()
+    test_backdate_and_rebuild()
     print()
     if FAILED:
         print(f"RESULT: FAIL ({len(FAILED)}): " + ", ".join(FAILED))

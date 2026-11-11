@@ -126,6 +126,11 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_source_user ON events(source, user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_events_dedupe
     ON events(source, dedupe_key) WHERE dedupe_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -226,6 +231,7 @@ class AffinityStore:
             conn.executescript(SCHEMA)
             self._ensure_columns(conn)
             self._migrate_purge_roleless_checkin(conn)
+            self._migrate_rebuild_scores(conn)
 
     @staticmethod
     def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -242,6 +248,45 @@ class AffinityStore:
         历史数据由「导入全部历史」重新按角色补齐。
         """
         conn.execute("DELETE FROM events WHERE source = 'checkin' AND role_id = ''")
+
+    def _migrate_rebuild_scores(self, conn: sqlite3.Connection) -> None:
+        """v0.12.3（一次性）：修复回填历史事件导致的虚假闲置衰减。
+
+        事故：apply_event 补录历史事件时把 last_settled_at 拖进过去，
+        之后任何一次正常结算（控制台刷新/每日循环/下一条事件）都按「闲置 N 天」
+        整段扣分，大量用户分数被剪掉。
+
+        修复口径：插件上线不足两天、衰减宽限期 3 天——库里**不存在任何合法衰减**，
+        全部衰减都是事故造成的。delta 列存的是每次事件的实际生效增量，
+        所以 score = Σdelta 即精确还原；last_settled_at 重置为当前（衰减时钟重新起算）；
+        last_interaction_at 取流水里最新的真实时间；peak 保留历史最高（只升不降）。
+        meta 表记录已执行，之后不再重跑（未来的合法衰减不会被抹掉）。
+        """
+        row = conn.execute("SELECT value FROM meta WHERE key = 'score_rebuild_v1'").fetchone()
+        if row is not None:
+            return
+        conn.execute(
+            """
+            UPDATE affinities SET
+                score = (
+                    SELECT COALESCE(SUM(e.delta), 0) FROM events e
+                    WHERE e.role_id = affinities.role_id AND e.user_id = affinities.user_id
+                ),
+                peak = MAX(peak, (
+                    SELECT COALESCE(SUM(e.delta), 0) FROM events e
+                    WHERE e.role_id = affinities.role_id AND e.user_id = affinities.user_id
+                )),
+                last_interaction_at = COALESCE((
+                    SELECT MAX(e.created_at) FROM events e
+                    WHERE e.role_id = affinities.role_id AND e.user_id = affinities.user_id
+                ), last_interaction_at),
+                last_settled_at = CAST(strftime('%s', 'now') AS INTEGER)
+            """
+        )
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('score_rebuild_v1', '1')"
+            " ON CONFLICT(key) DO UPDATE SET value = '1'"
+        )
 
     # ------------------------------------------------------------------ 基础
     @contextmanager
@@ -468,9 +513,14 @@ class AffinityStore:
                 ).fetchone()
 
             before = float(row["score"])
-            settled, decayed, settled_at = self._settle(
-                before, int(row["last_settled_at"]), moment, rules
-            )
+            last_settled = int(row["last_settled_at"])
+            if moment < last_settled:
+                # 补录历史事件（签到导入等）：不触发闲置衰减，也不把结算点往回拨——
+                # 回拨会让之后任意一次正常结算把这段「假闲置」整段扣掉
+                # （v0.12.2 全量导入事故的根因，v0.12.3 修复）。
+                settled, decayed, settled_at = float(before), 0.0, last_settled
+            else:
+                settled, decayed, settled_at = self._settle(before, last_settled, moment, rules)
 
             # 幂等：显式 dedupe_key 全局唯一；无 key 的 core 事件按「同码同人 N 秒内」去重
             duplicate = False
@@ -562,7 +612,7 @@ class AffinityStore:
             )
             conn.execute(
                 "UPDATE affinities SET score = ?, peak = MAX(peak, ?), revision = revision + 1,"
-                " last_interaction_at = ?, last_settled_at = ?,"
+                " last_interaction_at = MAX(last_interaction_at, ?), last_settled_at = ?,"
                 " display_name = CASE WHEN ? <> '' THEN ? ELSE display_name END,"
                 " platform = CASE WHEN ? <> '' THEN ? ELSE platform END"
                 " WHERE role_id = ? AND user_id = ?",
