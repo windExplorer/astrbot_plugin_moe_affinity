@@ -328,6 +328,36 @@ def test_rules_info():
     check("宽限期超 7 天不出空区间", all("11–7" not in text for text in ranges), str(ranges))
 
 
+def test_role_alias():
+    print("[alias]")
+    import sqlite3
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_alias_"))
+    try:
+        db_path = tmp / "old.db"
+        # 模拟老库：roles 表还没有 alias 列
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                "CREATE TABLE roles(role_id TEXT PRIMARY KEY,"
+                " display_name TEXT NOT NULL DEFAULT '',"
+                " created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db = store.AffinityStore(db_path)  # 打开时应自动补列
+        role = db.ensure_role("persona_a")
+        check("老库自动补 alias 列", db.role_alias(role) == "")
+        check("设置别名", db.set_role_alias(role, "小叽") and db.role_alias(role) == "小叽")
+        check("有别名时优先用别名", db.role_label(role) == "小叽")
+        check("清除别名回落到 display_name", db.set_role_alias(role, "") and db.role_label(role) == "persona_a")
+        check("list_roles 带 alias 字段", "alias" in db.list_roles()[0], str(db.list_roles()[0]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_identity_cache():
     print("[identity]")
     tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_identity_"))
@@ -471,6 +501,7 @@ def main():
     test_console_queries()
     test_mood()
     test_rules_info()
+    test_role_alias()
     test_identity_cache()
     test_migration_role_scope()
     test_migration()

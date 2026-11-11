@@ -50,6 +50,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS roles (
     role_id     TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
+    alias       TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
@@ -221,6 +222,14 @@ class AffinityStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_columns(conn)
+
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection) -> None:
+        """给老库补列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）。"""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(roles)")}
+        if "alias" not in columns:
+            conn.execute("ALTER TABLE roles ADD COLUMN alias TEXT NOT NULL DEFAULT ''")
 
     # ------------------------------------------------------------------ 基础
     @contextmanager
@@ -287,7 +296,7 @@ class AffinityStore:
         """
         with self._db() as conn:
             rows = conn.execute(
-                "SELECT r.role_id, r.display_name, r.created_at,"
+                "SELECT r.role_id, r.display_name, r.alias, r.created_at,"
                 " (SELECT COUNT(*) FROM role_personas p WHERE p.role_id = r.role_id) AS personas,"
                 " (SELECT COUNT(*) FROM affinities a WHERE a.role_id = r.role_id) AS users,"
                 " (SELECT COALESCE(MAX(a.last_interaction_at), 0) FROM affinities a"
@@ -708,6 +717,36 @@ class AffinityStore:
                     (str(gid), str(name or ""), now),
                 )
         return len(mapping)
+
+    def role_alias(self, role_id: str) -> str:
+        """只取用户设置的别名（没设置返回空串）。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT alias FROM roles WHERE role_id = ?", (role_id,)
+            ).fetchone()
+        return str(row["alias"] or "").strip() if row else ""
+
+    def role_label(self, role_id: str) -> str:
+        """展示用名字：有别名用别名，否则用 display_name，最后回落 role_id。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT role_id, display_name, alias FROM roles WHERE role_id = ?", (role_id,)
+            ).fetchone()
+        if not row:
+            return role_id
+        alias = str(row["alias"] or "").strip()
+        return alias or str(row["display_name"] or "").strip() or role_id
+
+    def set_role_alias(self, role_id: str, alias: str) -> bool:
+        with self._db() as conn:
+            row = conn.execute("SELECT 1 FROM roles WHERE role_id = ?", (role_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute(
+                "UPDATE roles SET alias = ?, updated_at = ? WHERE role_id = ?",
+                (str(alias or "").strip(), int(time.time()), role_id),
+            )
+        return True
 
     def rename_role(self, role_id: str, name: str) -> bool:
         with self._db() as conn:

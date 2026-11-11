@@ -111,6 +111,7 @@ export interface PingInfo {
 export interface RoleRow {
   role_id: string;
   display_name: string;
+  alias: string;
   created_at: number;
   personas: number;
   users: number;
@@ -356,6 +357,8 @@ export const apiMood = (role: string) => apiGet<MoodData>(`/mood?role=${encodeUR
 export const apiRoles = () => apiGet<{ items: RoleRow[]; total: number }>("/roles");
 export const apiRolePersonas = () =>
   apiGet<{ items: RolePersonaRow[]; alive: string[] }>("/roles/personas");
+export const apiSetRoleAlias = (role_id: string, alias: string) =>
+  apiPost<{ role_id: string; alias: string }>("/roles/alias", { role_id, alias });
 export const apiRenameRole = (role_id: string, name: string) =>
   apiPost<{ role_id: string; name: string }>("/roles/rename", { role_id, name });
 export const apiMergeRoles = (target: string, source: string) =>

@@ -466,6 +466,18 @@ async def h_roles_personas(plugin) -> dict:
     return ok({"items": items, "alive": sorted(alive)})
 
 
+async def h_role_alias(plugin) -> dict:
+    """给人格/角色设置别名：控制台与指令都优先展示别名。"""
+    body = await _payload()
+    role_id = str(body.get("role_id") or "").strip()
+    alias = str(body.get("alias") or "").strip()
+    if not role_id:
+        return err("缺少 role_id")
+    if not plugin.store.set_role_alias(role_id, alias):
+        return err("角色不存在")
+    return ok({"role_id": role_id, "alias": alias})
+
+
 async def h_role_rename(plugin) -> dict:
     body = await _payload()
     role_id = str(body.get("role_id") or "").strip()
@@ -778,6 +790,7 @@ def register_apis(plugin) -> None:
         ("/mood", h_mood, ["GET"]),
         ("/rules", h_rules, ["GET"]),
         ("/roles/personas", h_roles_personas, ["GET"]),
+        ("/roles/alias", h_role_alias, ["POST"]),
         ("/roles/rename", h_role_rename, ["POST"]),
         ("/roles/merge", h_role_merge, ["POST"]),
         ("/migrate/preview", h_migrate_preview, ["GET"]),

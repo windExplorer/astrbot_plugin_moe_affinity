@@ -2,9 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import {
   apiMergeRoles,
-  apiRenameRole,
   apiRolePersonas,
   apiRoles,
+  apiSetRoleAlias,
   type RolePersonaRow,
   type RoleRow,
 } from "../api";
@@ -43,20 +43,20 @@ const personasView = computed(() =>
 const unusedRoles = computed(() => roles.value.filter((role) => !role.in_use).length);
 const unusedPersonas = computed(() => personas.value.filter((item) => !item.in_use).length);
 
-function startRename(role: RoleRow) {
+function startAlias(role: RoleRow) {
   editing.value = role.role_id;
-  draftName.value = role.display_name || role.role_id;
+  draftName.value = role.alias || "";
 }
 
-async function commitRename(role: RoleRow) {
-  const name = draftName.value.trim();
-  if (!name || name === role.display_name) {
+async function commitAlias(role: RoleRow) {
+  const alias = draftName.value.trim();
+  if (alias === (role.alias || "")) {
     editing.value = "";
     return;
   }
   try {
-    await apiRenameRole(role.role_id, name);
-    notify("已改名");
+    await apiSetRoleAlias(role.role_id, alias);
+    notify(alias ? `别名已设为「${alias}」` : "已清除别名");
     editing.value = "";
     await load();
     await bootstrap(true);
@@ -64,6 +64,8 @@ async function commitRename(role: RoleRow) {
     notify(e?.message || String(e), true);
   }
 }
+
+const roleTitle = (role: RoleRow) => role.alias || role.display_name || role.role_id;
 
 function startMerge(role: RoleRow) {
   mergeSource.value = role;
@@ -91,7 +93,7 @@ const targetOptions = computed(() =>
   roles.value
     .filter((role) => role.role_id !== mergeSource.value?.role_id)
     .map((role) => ({
-      label: `${role.display_name || role.role_id}${role.in_use ? "" : "（未使用）"}`,
+      label: `${roleTitle(role)}${role.in_use ? "" : "（未使用）"}`,
       value: role.role_id,
     })),
 );
@@ -115,8 +117,8 @@ onMounted(load);
     </div>
 
     <p class="faint" style="margin: 0 0 12px">
-      启动时会按 AstrBot 里的人格各建一个角色。「使用中」= 有会话绑定到该人格，或已有分数记录；
-      两者都没有的空壳不算，关掉上面的开关可以看到全部。
+      别名会用在指令输出（「你与『别名』的关系」）和控制台里；没设别名时，指令退回显示 QQ 昵称。
+      「使用中」= 有会话绑定到该人格，或已有分数记录；两者都没有的空壳不算，关掉上面的开关可以看到全部。
     </p>
 
     <table>
@@ -134,16 +136,19 @@ onMounted(load);
         <tr v-for="role in rolesView" :key="role.role_id">
           <td>
             <div v-if="editing === role.role_id" class="row">
-              <n-input v-model:value="draftName" size="small" style="width: 180px" />
-              <n-button size="small" type="primary" @click="commitRename(role)">保存</n-button>
+              <n-input v-model:value="draftName" size="small" style="width: 180px" placeholder="留空 = 使用 QQ 昵称" />
+              <n-button size="small" type="primary" @click="commitAlias(role)">保存</n-button>
               <n-button size="small" quaternary @click="editing = ''">取消</n-button>
             </div>
             <div v-else>
               <div class="row" style="gap: 6px">
-                <span style="font-weight: 550">{{ role.display_name || role.role_id }}</span>
+                <span style="font-weight: 550">{{ roleTitle(role) }}</span>
+                <n-tag v-if="role.alias" size="tiny" round :bordered="false" type="info">别名</n-tag>
                 <n-tag v-if="!role.in_use" size="tiny" round :bordered="false" type="warning">未使用</n-tag>
               </div>
-              <div class="faint">{{ role.role_id }}</div>
+              <div class="faint">
+                {{ role.role_id }}<template v-if="role.alias && role.display_name"> · {{ role.display_name }}</template>
+              </div>
             </div>
           </td>
           <td class="mono">{{ personaCount(role.role_id) }}</td>
@@ -152,7 +157,7 @@ onMounted(load);
           <td class="faint">{{ role.last_active_at ? timeAgo(role.last_active_at) : "—" }}</td>
           <td>
             <div class="row" v-if="editing !== role.role_id">
-              <n-button size="small" quaternary @click="startRename(role)">改名</n-button>
+              <n-button size="small" quaternary @click="startAlias(role)">设置别名</n-button>
               <n-button size="small" quaternary :disabled="roles.length < 2" @click="startMerge(role)">
                 并入其它角色
               </n-button>

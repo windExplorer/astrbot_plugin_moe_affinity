@@ -31,7 +31,7 @@ const roleOptions = computed(() => {
   const current = app.roles.find((role) => role.role_id === app.role);
   if (current && !list.some((role) => role.role_id === current.role_id)) list.push(current);
   return list.map((role) => ({
-    label: role.display_name || role.role_id,
+    label: role.alias || role.display_name || role.role_id,
     value: role.role_id,
   }));
 });

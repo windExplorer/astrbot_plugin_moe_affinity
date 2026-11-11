@@ -521,7 +521,11 @@ class MoeAffinityPlugin(Star):
                 return
             snapshot = await asyncio.to_thread(self.store.snapshot, role_id, target, rules)
             target_name = str(snapshot.get("display_name") or "").strip() or target
-            yield event.plain_result(self._render_detail(snapshot, title=f"「{target_name}」的好感度"))
+            alias = await asyncio.to_thread(self.store.role_alias, role_id)
+            title = (
+                f"{target_name} 与「{alias}」的关系" if alias else f"「{target_name}」的好感度"
+            )
+            yield event.plain_result(self._render_detail(snapshot, title=title))
             return
 
         if not sender:
@@ -529,13 +533,16 @@ class MoeAffinityPlugin(Star):
             return
         snapshot = await asyncio.to_thread(self.store.snapshot, role_id, sender, rules)
         recent = await asyncio.to_thread(self.store.recent_events, role_id, sender, 3)
-        # 标题用「谁的好感度」而不是人格/角色名：用户看不懂 persona id
+        # 标题：人格/角色设了别名就用别名（「你与『小叽』的关系」），
+        # 没设别名就退回被查询者的 QQ 昵称，不要暴露 persona id。
         name = (
             str(event.get_sender_name() or "").strip()
             or str(snapshot.get("display_name") or "").strip()
             or sender
         )
-        text = self._render_detail(snapshot, title=f"「{name}」的好感度")
+        alias = await asyncio.to_thread(self.store.role_alias, role_id)
+        title = f"你与「{alias}」的关系" if alias else f"「{name}」的好感度"
+        text = self._render_detail(snapshot, title=title)
         if recent:
             parts = [
                 f"{store.CODE_LABELS.get(item['code'], item['code'])} {int(item['delta']):+d}"
