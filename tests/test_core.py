@@ -406,6 +406,89 @@ def test_identity_cache():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_daily_cap_scope():
+    print("[cap]")
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_cap_"))
+    try:
+        db = store.AffinityStore(tmp / "cap.db")
+        rules = store.Rules()
+        role = db.ensure_role("p1")
+        noon = int(datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp())
+
+        imp = db.apply_event(role_id=role, user_id="u1", code="import.seed", delta=100,
+                             source="import", rules=rules, now=noon)
+        check("导入全额到账", imp["applied"] == 100, str(imp))
+        chat = db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=5,
+                              rules=rules, now=noon + 120)
+        check("导入不占当日上限：聊天照常 +5", chat["applied"] == 5, str(chat))
+        manual = db.apply_event(role_id=role, user_id="u1", code="manual.adjust", delta=100,
+                                source="manual", rules=rules, now=noon + 240)
+        check("手动全额到账", manual["applied"] == 100, str(manual))
+        chat = db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=5,
+                              rules=rules, now=noon + 360)
+        check("手动也不占当日上限", chat["applied"] == 5, str(chat))
+
+        # 核心计分自己仍然被夹：今天 core 已 +10，再连加到 30 为止
+        applied = 5
+        t = noon + 480
+        for _ in range(20):
+            chat = db.apply_event(role_id=role, user_id="u1", code="chat.message", delta=5,
+                                  rules=rules, now=t)
+            t += 120
+            applied = float(chat["applied"])
+            if applied <= 0:
+                break
+        check("核心计分加满 30 后被夹", applied == 0 and chat["score"] == 230, str(chat))
+
+        detail = db.user_detail(role, "u1", rules, now=t)
+        today = detail["today"]
+        check("今日涨分按核心计分 30", today["gain"] == 30.0, str(today))
+        check("今日全部变动 230", today["gain_all"] == 230.0, str(today))
+
+        # 负向：导入扣分也不占负向上限（先垫分，避免 0 分下限吃掉扣分）
+        db.apply_event(role_id=role, user_id="u2", code="chat.message", delta=50,
+                       rules=rules, now=noon)
+        db.apply_event(role_id=role, user_id="u2", code="import.seed", delta=-15,
+                       source="import", rules=rules, now=noon + 60)
+        loss1 = db.apply_event(role_id=role, user_id="u2", code="chat.negative", delta=-6,
+                               rules=rules, now=noon + 180)
+        check("导入扣分不占负向上限", loss1["applied"] == -6, str(loss1))
+        loss2 = db.apply_event(role_id=role, user_id="u2", code="chat.negative", delta=-6,
+                               rules=rules, now=noon + 300)
+        check("负向核心计分只算自己（未受导入影响）", loss2["applied"] == -6, str(loss2))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_first_seen_channels():
+    print("[first_seen]")
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_fs_"))
+    try:
+        db = store.AffinityStore(tmp / "fs.db")
+        rules = store.Rules()
+        role_a = db.ensure_role("pa")
+        role_b = db.ensure_role("pb")
+        for rid in (role_a, role_b):
+            db.apply_event(role_id=rid, user_id="u1", code="import.seed", delta=10,
+                           source="import", rules=rules, first_seen_at=1000, now=20000)
+
+        moved = db.repair_first_seen_all({"u1": 800})
+        check("跨角色回填两条", moved == 2, str(moved))
+        check("角色 A 提前到 800", db.snapshot(role_a, "u1", rules)["first_seen_at"] == 800)
+        check("角色 B 提前到 800", db.snapshot(role_b, "u1", rules)["first_seen_at"] == 800)
+        check("不会推后", db.repair_first_seen_all({"u1": 9000}) == 0)
+        check("未建档的人跳过", db.repair_first_seen_all({"ghost": 100}) == 0)
+
+        ok_set = db.set_first_seen(role_a, "u1", 3000)
+        check("手动可推后", ok_set and db.snapshot(role_a, "u1", rules)["first_seen_at"] == 3000)
+        clamped = db.set_first_seen(role_a, "u1", 99999, now=20000)
+        check("手动不超过当前时间",
+              clamped and db.snapshot(role_a, "u1", rules)["first_seen_at"] == 20000)
+        check("未建档返回 False", not db.set_first_seen(role_a, "ghost", 100))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_migration_role_scope():
     print("[migration/role]")
     import migrate_self_learning as mig
@@ -470,6 +553,11 @@ def test_migration():
                 "CREATE TABLE user_affections(id INTEGER PRIMARY KEY, group_id TEXT, user_id TEXT,"
                 " affection_level INTEGER, max_affection INTEGER, created_at INTEGER, updated_at INTEGER);"
                 "CREATE TABLE bot_mood(id INTEGER PRIMARY KEY, group_id TEXT, mood_type TEXT, is_active INTEGER);"
+                "CREATE TABLE raw_messages(id INTEGER PRIMARY KEY, sender_id TEXT, timestamp REAL);"
+                "CREATE TABLE user_conversation_history(id INTEGER PRIMARY KEY, group_id TEXT,"
+                " user_id TEXT, role TEXT, content TEXT, timestamp INTEGER);"
+                "CREATE TABLE affection_interactions(id INTEGER PRIMARY KEY,"
+                " user_affection_id INTEGER, timestamp INTEGER);"
             )
             conn.executemany(
                 "INSERT INTO user_affections(group_id, user_id, affection_level, max_affection,"
@@ -479,6 +567,19 @@ def test_migration():
                     ("g2", "u1", 80, 100, 150, 200),  # 同一用户取最高
                     ("g1", "u2", 50, 100, 300, 150),
                 ],
+            )
+            # 消息侧的最早记录比 created_at 更早：认识时间应取这些
+            conn.executemany(
+                "INSERT INTO raw_messages(sender_id, timestamp) VALUES(?,?)",
+                [("u1", 50.0), ("u2", 999.0), ("u9", 10.0)],  # u9 只在消息里出现过，无好感度行
+            )
+            conn.executemany(
+                "INSERT INTO user_conversation_history(group_id, user_id, role, content, timestamp)"
+                " VALUES(?,?,?,?,?)",
+                [("g1", "u2", "user", "你好", 250)],
+            )
+            conn.execute(
+                "INSERT INTO affection_interactions(user_affection_id, timestamp) VALUES(1, 70)"
             )
             conn.executemany(
                 "INSERT INTO bot_mood(group_id, mood_type, is_active) VALUES(?,?,?)",
@@ -500,7 +601,9 @@ def test_migration():
         check("比例换算 50/100 -> 500", mapped["u2"] == 500, str(mapped))
         check("换算不做上限裁剪", all(item["target_score"] >= 0 for item in plan))
         firsts = {item["user_id"]: item["first_at"] for item in plan}
-        check("取最早创建时间为认识时间", firsts["u1"] == 100 and firsts["u2"] == 300, str(firsts))
+        check("认识时间取多来源最早（消息 50 优于 created_at 100）", firsts["u1"] == 50, str(firsts))
+        check("对话史 250 优于 created_at 300", firsts["u2"] == 250, str(firsts))
+        check("只在消息里出现过的人不进计划", "u9" not in mapped, str(sorted(mapped)))
 
         evidence = json.loads(mig.evidence_json(plan[0]))
         check("evidence 记录来源与群明细", evidence["from"] == "self_learning" and evidence["groups"], str(evidence))
@@ -523,6 +626,8 @@ def main():
     test_decay()
     test_scoring()
     test_store()
+    test_daily_cap_scope()
+    test_first_seen_channels()
     test_console_queries()
     test_mood()
     test_rules_info()

@@ -481,17 +481,21 @@ class AffinityStore:
                 )
 
             applied = 0.0
-            # 每日上限只约束核心计分；管理员调整 / 迁移导入不受限（否则一次 -100 会被夹成 -20）
+            # 每日上限只约束、也只累计核心计分（source="core"）：管理员调整 / 迁移导入
+            # 本身不受限（一次 -100 不会被夹成 -20），也不占用当天的额度——
+            # 否则导入几百分会把当天聊天计分的上限一口吃光。
             if not duplicate and delta and source == "core":
                 start = day_start(moment)
                 gains = conn.execute(
                     "SELECT COALESCE(SUM(delta), 0) AS s FROM events"
-                    " WHERE role_id = ? AND user_id = ? AND delta > 0 AND created_at >= ?",
+                    " WHERE role_id = ? AND user_id = ? AND delta > 0 AND created_at >= ?"
+                    " AND source = 'core'",
                     (role_id, user_id, start),
                 ).fetchone()["s"]
                 losses = conn.execute(
                     "SELECT COALESCE(SUM(delta), 0) AS s FROM events"
-                    " WHERE role_id = ? AND user_id = ? AND delta < 0 AND created_at >= ?",
+                    " WHERE role_id = ? AND user_id = ? AND delta < 0 AND created_at >= ?"
+                    " AND source = 'core'",
                     (role_id, user_id, start),
                 ).fetchone()["s"]
                 if delta > 0:
@@ -858,6 +862,45 @@ class AffinityStore:
                 updated += int(cursor.rowcount or 0)
         return updated
 
+    def repair_first_seen_all(self, mapping: dict[str, int]) -> int:
+        """按「人」回填认识时间：不分角色，所有角色里该用户的 first_seen_at 都往早修。
+
+        群入群时间是关于「这个人」的事实（TA 什么时候出现在 bot 的世界里），
+        与角色无关；用户还没建档的人自然匹配不到行，等于跳过。
+        """
+        if not mapping:
+            return 0
+        updated = 0
+        with self._db() as conn:
+            for user_id, first_at in mapping.items():
+                stamp = int(first_at or 0)
+                uid = str(user_id or "").strip()
+                if stamp <= 0 or not uid:
+                    continue
+                cursor = conn.execute(
+                    "UPDATE affinities SET first_seen_at = ?"
+                    " WHERE user_id = ?"
+                    " AND (first_seen_at = 0 OR first_seen_at > ?)",
+                    (stamp, uid, stamp),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
+
+    def set_first_seen(self, role_id: str, user_id: str, stamp: int, *, now: int | None = None) -> bool:
+        """手动指定认识时间（控制台兜底：好友时长/私聊首聊这类协议拿不到的渠道）。
+
+        与 repair_first_seen 不同，这里**允许往回推后**——是显式的人工意图；
+        仍然不允许超过当前时间。
+        """
+        moment = int(now if now is not None else time.time())
+        stamp = max(0, min(int(stamp or 0), moment))
+        with self._db() as conn:
+            cursor = conn.execute(
+                "UPDATE affinities SET first_seen_at = ? WHERE role_id = ? AND user_id = ?",
+                (stamp, role_id, str(user_id or "").strip()),
+            )
+            return int(cursor.rowcount or 0) > 0
+
     def users_without_name(self, limit: int = 200) -> list[str]:
         """还没有昵称的用户 id（用于按需调 get_stranger_info 补名）。"""
         with self._db() as conn:
@@ -1126,6 +1169,14 @@ class AffinityStore:
                 " WHERE role_id = ? AND user_id = ? AND created_at >= ?",
                 (role_id, user_id, day_start(moment)),
             ).fetchone()
+            # 上限进度只看核心计分（与 store.apply_event 的口径一致）；
+            # 导入/手动这些「不受限」的变动单独给一个总数，展示时兜底说明。
+            today_core = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0) AS gain,"
+                " COALESCE(SUM(CASE WHEN delta < 0 THEN delta ELSE 0 END), 0) AS loss FROM events"
+                " WHERE role_id = ? AND user_id = ? AND created_at >= ? AND source = 'core'",
+                (role_id, user_id, day_start(moment)),
+            ).fetchone()
             role_row = conn.execute(
                 "SELECT display_name, alias FROM roles WHERE role_id = ?", (role_id,)
             ).fetchone()
@@ -1140,8 +1191,10 @@ class AffinityStore:
             "status": "ok",
             "snapshot": snapshot,
             "today": {
-                "gain": round(float(today["gain"]), 1),
-                "loss": round(abs(float(today["loss"])), 1),
+                "gain": round(float(today_core["gain"]), 1),
+                "loss": round(abs(float(today_core["loss"])), 1),
+                "gain_all": round(float(today["gain"]), 1),
+                "loss_all": round(abs(float(today["loss"])), 1),
                 "events": int(today["events"]),
                 "gain_cap": float(rules.daily_gain_cap),
                 "loss_cap": float(rules.daily_loss_cap),

@@ -182,7 +182,15 @@ export interface UsersPage {
 export interface UserDetail {
   status: string;
   role_id: string;
-  today?: { gain: number; loss: number; events: number; gain_cap: number; loss_cap: number };
+  today?: {
+    gain: number;
+    loss: number;
+    gain_all?: number;
+    loss_all?: number;
+    events: number;
+    gain_cap: number;
+    loss_cap: number;
+  };
   role?: { role_id: string; alias: string; display_name: string; personas: number };
   last_settled_at?: number;
   snapshot?: UserRow & { peak: number; revision: number; stage_floor: number };
@@ -293,6 +301,7 @@ export interface MigrateItem {
   target_score: number;
   groups: { group_id: string; score: number; limit: number }[];
   group_count: number;
+  first_at: number;
   last_at: number;
   imported: boolean;
 }
@@ -414,7 +423,7 @@ export const apiGroups = (role: string) =>
 export const apiGroup = (role: string, id: string) =>
   apiGet<GroupDetail>(`/group?role=${encodeURIComponent(role)}&id=${encodeURIComponent(id)}`);
 export const apiSync = (members = false) =>
-  apiPost<{ ok: boolean; users: number; groups: number; renamed: number; members: boolean; errors: string[] }>(
+  apiPost<{ ok: boolean; users: number; groups: number; renamed: number; members: boolean; calibrated: number; errors: string[] }>(
     "/sync",
     { members },
     180000,
@@ -443,4 +452,10 @@ export const apiSetScore = (body: {
 }) => apiPost<{ changed: number }>("/score", { ...body, operator: "dashboard" });
 export const apiResetScore = (body: { role: string; id: string; reason?: string }) =>
   apiPost<{ changed: number }>("/reset", { ...body, operator: "dashboard" });
+export const apiSetFirstSeen = (role: string, id: string, stamp: number) =>
+  apiPost<{ role_id: string; user_id: string; first_seen_at: number }>("/user/first_seen", {
+    role,
+    id,
+    stamp,
+  });
 export const apiConflicts = () => apiGet<{ items: ConflictRow[]; checked_at: number }>("/conflicts");

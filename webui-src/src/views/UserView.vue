@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { apiMood, apiUser, type MoodData, type UserDetail, type UserRow } from "../api";
+import { apiMood, apiSetFirstSeen, apiUser, type MoodData, type UserDetail, type UserRow } from "../api";
 import { app, notify } from "../state";
 import EChart from "../components/EChart.vue";
 import ScoreDialog from "../components/ScoreDialog.vue";
@@ -68,6 +68,45 @@ const todayLossRatio = computed(() => {
   if (!value || !value.loss_cap) return 0;
   return Math.min(100, (value.loss / value.loss_cap) * 100);
 });
+// 上限只约束聊天计分；导入/手动这些「不受限」的变动单独提示，避免「涨了 1000 但只显示 30」的疑惑
+const extraGain = computed(() => {
+  const value = today.value;
+  if (value?.gain_all == null) return 0;
+  return Math.max(0, value.gain_all - value.gain);
+});
+const extraLoss = computed(() => {
+  const value = today.value;
+  if (value?.loss_all == null) return 0;
+  return Math.max(0, value.loss_all - value.loss);
+});
+
+// 认识时间人工调整：好友时长/私聊首聊这类协议拿不到的渠道，人工兜底
+const firstSeenEditing = ref(false);
+const firstSeenValue = ref<number | null>(null);
+const firstSeenBusy = ref(false);
+
+function startFirstSeenEdit() {
+  firstSeenValue.value = (snap.value?.first_seen_at || 0) * 1000;
+  firstSeenEditing.value = true;
+}
+
+async function saveFirstSeen() {
+  if (!firstSeenValue.value) {
+    notify("先选一个日期", true);
+    return;
+  }
+  firstSeenBusy.value = true;
+  try {
+    await apiSetFirstSeen(app.role, userId.value, Math.floor(firstSeenValue.value / 1000));
+    notify("认识时间已更新");
+    firstSeenEditing.value = false;
+    await load();
+  } catch (e: any) {
+    notify(e?.message || String(e), true);
+  } finally {
+    firstSeenBusy.value = false;
+  }
+}
 
 const MOOD_LABELS: Record<string, string> = { joy: "喜悦", anger: "烦躁", sorrow: "低落", fear: "不安" };
 const moodAxes = computed(() =>
@@ -174,10 +213,23 @@ function saved() {
 
       <div class="row" style="margin-top: 12px">
         <span class="faint">认识 {{ knownDays }} 天（首次 {{ fmtDate(snap.first_seen_at) }}）</span>
+        <n-button size="tiny" quaternary @click="startFirstSeenEdit">调整</n-button>
         <span class="faint">·</span>
         <span class="faint">最近互动 {{ timeAgo(snap.last_interaction_at) }}（{{ fmtTime(snap.last_interaction_at) }}）</span>
         <span class="faint">·</span>
         <span class="faint">群贡献合计 {{ signed(detail?.group_delta_total || 0) }}</span>
+      </div>
+      <div v-if="firstSeenEditing" class="row" style="margin-top: 8px">
+        <n-date-picker
+          v-model:value="firstSeenValue"
+          type="date"
+          size="small"
+          style="width: 180px"
+          :clearable="false"
+        />
+        <n-button size="small" type="primary" :loading="firstSeenBusy" @click="saveFirstSeen">保存</n-button>
+        <n-button size="small" quaternary @click="firstSeenEditing = false">取消</n-button>
+        <span class="faint">成为好友的时间、私聊首聊协议拿不到，只能在这里人工指定</span>
       </div>
     </div>
 
@@ -188,6 +240,7 @@ function saved() {
         <div class="bar" style="margin-top: 6px">
           <i :style="{ width: todayGainRatio + '%' }"></i>
         </div>
+        <div v-if="extraGain > 0" class="s">另含导入/手动 +{{ Math.round(extraGain) }}（不计入上限）</div>
       </div>
       <div class="stat">
         <span class="k">今日扣分</span>
@@ -195,6 +248,7 @@ function saved() {
         <div class="bar" style="margin-top: 6px">
           <i :style="{ width: todayLossRatio + '%' }"></i>
         </div>
+        <div v-if="extraLoss > 0" class="s">另含导入/手动 -{{ Math.round(extraLoss) }}（不计入上限）</div>
       </div>
       <div class="stat">
         <span class="k">今日事件</span>

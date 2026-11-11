@@ -8,7 +8,10 @@
 - 老库里是 ``per_group``：同一个人在多个群各有一行；
 - 导入到我们这边是「角色 × 用户」一份，所以**按用户取最高**（最高分那条代表这段关系的最好证据），
   其余群的记录整条塞进事件 ``evidence`` 留档；
-- 分数按比例换算：``老分 / 老上限 * 我们的上限``，不直接搬数字（老库上限是 100，我们是 1000）。
+- 分数按比例换算：``老分 / 老上限 * 我们的上限``，不直接搬数字（老库上限是 100，我们是 1000）；
+- 认识时间不信任 ``user_affections.created_at`` 单一来源：它可能在好感度行被重建时变新，
+  所以同时读 raw_messages / user_conversation_history / affection_interactions 里
+  每个用户**最早**的一条记录，取全部来源的最早值（缺表就跳过，老版本库也兼容）。
 """
 
 from __future__ import annotations
@@ -47,6 +50,42 @@ def resolve_db_path(explicit: str | None, default_dir: Path | None) -> Path | No
     return candidate if candidate.is_file() else None
 
 
+def _earliest_activity(conn: sqlite3.Connection) -> dict[str, int]:
+    """老库消息侧的「每人最早记录」，比 user_affections.created_at 更接近真实的第一次。
+
+    消息/交互流水只会追加不会重建，时间戳是可信的；好感度行的 created_at 在
+    行被删除重建后会变成「重建时间」。缺哪张表就跳过哪张（老版本库不一定都有）。
+    """
+    tables = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    out: dict[str, int] = {}
+
+    def merge(rows) -> None:
+        for user_id, stamp in rows:
+            uid = str(user_id or "").strip()
+            ts = int(stamp or 0)
+            if not uid or ts <= 0:
+                continue
+            if uid not in out or ts < out[uid]:
+                out[uid] = ts
+
+    if "raw_messages" in tables:
+        merge(conn.execute(
+            "SELECT sender_id, MIN(timestamp) FROM raw_messages GROUP BY sender_id"
+        ).fetchall())
+    if "user_conversation_history" in tables:
+        merge(conn.execute(
+            "SELECT user_id, MIN(timestamp) FROM user_conversation_history GROUP BY user_id"
+        ).fetchall())
+    if "affection_interactions" in tables and "user_affections" in tables:
+        merge(conn.execute(
+            "SELECT ua.user_id, MIN(ai.timestamp) FROM affection_interactions ai"
+            " JOIN user_affections ua ON ua.id = ai.user_affection_id GROUP BY ua.user_id"
+        ).fetchall())
+    return out
+
+
 def read_legacy(db_path: Path) -> list[dict[str, Any]]:
     """读老库并按用户聚合。读不到表 / 文件损坏时抛异常，由调用方转成提示。"""
     uri = f"file:{db_path.as_posix()}?mode=ro"
@@ -57,6 +96,9 @@ def read_legacy(db_path: Path) -> list[dict[str, Any]]:
             "SELECT group_id, user_id, affection_level, max_affection, created_at, updated_at"
             " FROM user_affections"
         ).fetchall()
+        # 认识时间取多来源最早值：只影响好感度表里已有的人（纯消息记录、没有好感度行的
+        # 用户本来就没有分数可导，不进计划）
+        earliest = _earliest_activity(conn)
     finally:
         conn.close()
 
@@ -84,6 +126,11 @@ def read_legacy(db_path: Path) -> list[dict[str, Any]]:
             entry["ratio"] = ratio
             entry["best_score"] = score
             entry["best_limit"] = limit
+
+    for user_id, stamp in earliest.items():
+        entry = by_user.get(user_id)
+        if entry is not None and stamp > 0 and (entry["first_at"] == 0 or stamp < entry["first_at"]):
+            entry["first_at"] = stamp
     return sorted(by_user.values(), key=lambda item: item["ratio"], reverse=True)
 
 

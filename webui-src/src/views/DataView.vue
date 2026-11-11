@@ -9,7 +9,7 @@ import {
   type RoleRow,
 } from "../api";
 import { app, notify } from "../state";
-import { timeAgo } from "../lib/format";
+import { fmtDate, timeAgo } from "../lib/format";
 
 const preview = ref<MigratePreview | null>(null);
 const selected = ref<Set<string>>(new Set());
@@ -174,6 +174,11 @@ onMounted(load);
     <n-alert style="margin-top: 12px" :bordered="false" type="default">
       {{ preview?.message || "同一用户多个群各有一条记录，导入时取最高那条；分数按比例换算（老库满分对应 1000 分）。" }}
       <span v-if="preview?.db_path" class="faint"> · 来源 {{ preview.db_path }}</span>
+      <br />
+      <span class="faint">
+        认识时间自动取老库里最早的一份证据（好感度建行时间 / 消息记录 / 对话史 / 交互史），
+        导入前可在下方「最早记录」列核对。
+      </span>
     </n-alert>
 
     <n-alert style="margin-top: 8px" :bordered="false" type="info">
@@ -204,6 +209,7 @@ onMounted(load);
           <th style="width: 120px">旧分数</th>
           <th style="width: 110px">换算后</th>
           <th style="width: 80px">群数</th>
+          <th style="width: 110px">最早记录</th>
           <th style="width: 100px">最近更新</th>
           <th style="width: 90px">状态</th>
         </tr>
@@ -227,6 +233,7 @@ onMounted(load);
           <td class="mono">{{ item.legacy_score }} / {{ item.legacy_max }}</td>
           <td class="mono">{{ item.target_score }}</td>
           <td class="mono">{{ item.group_count }}</td>
+          <td class="faint">{{ item.first_at > 0 ? fmtDate(item.first_at) : "—" }}</td>
           <td class="faint">{{ timeAgo(item.last_at) }}</td>
           <td>
             <n-tag size="small" round :bordered="false" :type="item.imported ? 'success' : 'warning'">
@@ -235,7 +242,7 @@ onMounted(load);
           </td>
         </tr>
         <tr v-if="!(preview?.items || []).length">
-          <td colspan="7"><div class="empty">{{ busy ? "读取中…" : "没有找到可迁移的数据" }}</div></td>
+          <td colspan="8"><div class="empty">{{ busy ? "读取中…" : "没有找到可迁移的数据" }}</div></td>
         </tr>
       </tbody>
     </table>

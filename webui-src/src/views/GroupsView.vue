@@ -29,9 +29,10 @@ async function sync() {
   syncing.value = true;
   try {
     const res = await apiSync(true);
+    const calibrated = res.calibrated > 0 ? `，认识时间校准 ${res.calibrated} 人` : "";
     notify(
       res.ok
-        ? `已同步 ${res.groups} 个群、「${res.renamed}」条昵称（含群成员）`
+        ? `已同步 ${res.groups} 个群、「${res.renamed}」条昵称（含群成员）${calibrated}`
         : res.errors?.[0] || "同步失败",
       !res.ok,
     );
@@ -55,6 +56,11 @@ watch(() => app.role, load);
       <span class="faint">分数是全局一份，这里统计每个群贡献了多少</span>
       <n-button size="small" quaternary :loading="syncing" @click="sync">同步群名与成员</n-button>
     </div>
+
+    <n-alert style="margin-bottom: 12px" :bordered="false" type="default">
+      同步会顺带用**群成员的入群时间**校准「认识天数」（取各群最早，且只会把时间往早修）；
+      bot 自己比某人晚入群时，按 bot 入群那一刻算起。
+    </n-alert>
 
     <n-alert v-if="missingGroups" style="margin-bottom: 12px" :bordered="false" type="warning">
       还有 {{ missingGroups }} 个群没有群名。点「同步群名与成员」补齐；bot 已退出的群拿不到名字。

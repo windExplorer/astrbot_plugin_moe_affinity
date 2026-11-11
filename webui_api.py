@@ -638,6 +638,28 @@ async def h_migrate_apply(plugin) -> dict:
     )
 
 
+async def h_set_first_seen(plugin) -> dict:
+    """手动设置某个用户的认识时间。
+
+    给「自动渠道都拿不到」的情况兜底：成为好友的时间 OneBot 协议不暴露，
+    纯私聊用户也没有入群时间可查——只能人工指定。允许任意方向调整（显式人工意图）。
+    """
+    body = await _payload()
+    role = _resolve_role(plugin, str(body.get("role") or ""))
+    user_id = str(body.get("id") or "").strip()
+    if not user_id:
+        return err("缺少 id")
+    try:
+        stamp = int(float(body.get("stamp")))
+    except (TypeError, ValueError):
+        return err("stamp 必须是秒级时间戳")
+    if stamp <= 0:
+        return err("stamp 必须是正数")
+    if not plugin.store.set_first_seen(role, user_id, stamp):
+        return err("该用户还没有好感度记录，无法设置认识时间")
+    return ok({"role_id": role, "user_id": user_id, "first_seen_at": stamp})
+
+
 def _aiocqhttp_platforms(plugin) -> list:
     try:
         insts = plugin.context.platform_manager.platform_insts
@@ -696,6 +718,10 @@ async def h_sync(plugin) -> dict:
     groups: dict[str, str] = {}
     errors: list[str] = []
     member_failed = 0
+    # 认识时间校准用：每个群的成员入群时间 + bot 自己在该群的入群时间。
+    # 「认识」的合理估计是 max(用户入群, bot 入群)——两者都在群里才谈得上认识。
+    member_join: dict[str, dict[str, int]] = {}
+    bot_joins: dict[str, int] = {}
 
     # 库里还没有昵称的人 / 还没有名字的群：好友列表和群列表都不一定有它们
     # （群成员通常不是好友），所以要单独用 get_stranger_info / get_group_info 兜底。
@@ -708,6 +734,13 @@ async def h_sync(plugin) -> dict:
         except Exception as exc:
             errors.append(f"获取协议端客户端失败: {exc}")
             continue
+
+        bot_id = ""
+        try:
+            login = await bot.call_action("get_login_info")
+            bot_id = str((login or {}).get("user_id") or "")
+        except Exception as exc:
+            logger.debug(f"[moe_affinity] 获取登录号失败（入群时间校准降级）: {exc}")
 
         try:
             friends = await bot.call_action("get_friend_list")
@@ -735,12 +768,22 @@ async def h_sync(plugin) -> dict:
                 except Exception:
                     member_failed += 1
                     continue
+                bot_join = 0
                 for member in members or []:
                     uid = str(member.get("user_id") or "")
                     name = str(member.get("card") or member.get("nickname") or "").strip()
                     # 群名片优先，但好友备注已经有名字时不覆盖
                     if uid and name and uid not in users:
                         users[uid] = name
+                    join = int(member.get("join_time") or 0)
+                    if not join:
+                        continue
+                    if bot_id and uid == bot_id:
+                        bot_join = join
+                        continue
+                    member_join.setdefault(gid, {})[uid] = join
+                if bot_join:
+                    bot_joins[gid] = bot_join
 
         # 兜底 1：按 QQ 号查昵称（群成员不是好友时靠这个）
         stranger_failed = 0
@@ -777,6 +820,25 @@ async def h_sync(plugin) -> dict:
     if member_failed:
         errors.append(f"{member_failed} 个群的成员列表拉取失败")
 
+    # 认识时间校准：入群时间是关于「这个人」的事实，与角色无关，所以跨全部角色回填；
+    # 只提前、不推后，还没有建档的人自然匹配不到行（等于跳过）。
+    calibrated = 0
+    if with_members and member_join:
+        candidates: dict[str, int] = {}
+        for gid, joins in member_join.items():
+            bot_join = int(bot_joins.get(gid) or 0)
+            for uid, join in joins.items():
+                met = max(int(join), bot_join)
+                if met <= 0:
+                    continue
+                if uid not in candidates or met < candidates[uid]:
+                    candidates[uid] = met
+        if candidates:
+            try:
+                calibrated = plugin.store.repair_first_seen_all(candidates)
+            except Exception as exc:
+                errors.append(f"认识时间校准失败: {exc}")
+
     renamed = plugin.store.upsert_user_names(users)
     group_count = plugin.store.upsert_groups(groups)
     return ok(
@@ -786,6 +848,7 @@ async def h_sync(plugin) -> dict:
             "groups": group_count,
             "renamed": renamed,
             "members": with_members,
+            "calibrated": calibrated,
             "errors": errors,
         }
     )
@@ -894,6 +957,7 @@ def register_apis(plugin) -> None:
         ("/config", h_set_config, ["POST"]),
         ("/score", h_score, ["POST"]),
         ("/reset", h_reset, ["POST"]),
+        ("/user/first_seen", h_set_first_seen, ["POST"]),
         ("/conflicts", h_conflicts, ["GET"]),
     ]
     for path, fn, methods in routes:
