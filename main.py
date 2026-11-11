@@ -41,6 +41,7 @@ def _read_plugin_version() -> str:
 PLUGIN_VERSION = _read_plugin_version()
 MARKER = "<affinity_context>"
 SKIP_SCORING = "moe_affinity_skip_scoring"
+PERSONA_CACHE = "moe_affinity_persona_id"
 
 
 def _reload_sibling_modules() -> None:
@@ -344,7 +345,14 @@ class MoeAffinityPlugin(Star):
             logger.warning(f"[moe_affinity] 计分失败: {exc}")
 
     async def _score(self, event: AstrMessageEvent, user_id: str) -> None:
-        role_id, persona_id = await self._role_for(event)
+        # 优先用「这轮 LLM 请求时」解析到的人格：那是真正生成回复的人格，
+        # 比在 after_message_sent 重新解析更准（避免会话状态在这里已变化）。
+        cached = str(event.get_extra(PERSONA_CACHE) or "").strip()
+        if cached:
+            persona_id = cached
+            role_id = self.store.ensure_role(cached, personas.role_label(cached))
+        else:
+            role_id, persona_id = await self._role_for(event)
         rules = self._rules()
         conf = self._scoring()
         platform = ""
@@ -398,7 +406,8 @@ class MoeAffinityPlugin(Star):
         if not user_id:
             return
         try:
-            role_id, _ = await self._role_for(event)
+            role_id, persona_id = await self._role_for(event)
+            event.set_extra(PERSONA_CACHE, persona_id)
             snapshot = await asyncio.to_thread(
                 self.store.snapshot, role_id, user_id, self._rules()
             )
@@ -436,7 +445,7 @@ class MoeAffinityPlugin(Star):
     # ------------------------------------------------------------------ 指令
     @filter.command("好感度")
     async def cmd_affinity(self, event: AstrMessageEvent):
-        """查看好感度：/好感度 · /好感度 @某人 · /好感度 设置 @某人 500|+20|-10"""
+        """查看好感度：/好感度 · /好感度 @某人 · /好感度 设置 @某人 500|+20|-10 · /好感度 诊断"""
         event.set_extra(SKIP_SCORING, True)
         args = self._args(event)
         target = self._at_target(event)
@@ -444,6 +453,23 @@ class MoeAffinityPlugin(Star):
         sender = str(event.get_sender_id() or "")
         role_id, _ = await self._role_for(event)
         rules = self._rules()
+
+        if args.startswith("诊断"):
+            if not admin:
+                yield event.plain_result("只有管理员可以查看人格诊断。")
+                return
+            info = await personas.explain(self.context, event)
+            yield event.plain_result(
+                "人格诊断（这轮会话）\n"
+                f"会话：{info['umo'] or '（空）'}\n"
+                f"会话级强制人格：{info['session_override'] or '（未设置）'}\n"
+                f"对话 ID：{info['conversation_id'] or '（还没有对话）'}\n"
+                f"对话绑定人格：{info['conversation_persona'] or '（空）'}\n"
+                f"全局默认人格：{info['default_persona'] or '（未设置）'}\n"
+                f"→ 归属：{info['resolved']}（来源：{info['source']}）\n"
+                f"角色：{role_id}"
+            )
+            return
 
         if args.startswith("设置"):
             if not admin:

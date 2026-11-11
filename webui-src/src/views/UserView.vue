@@ -170,6 +170,32 @@ function saved() {
       </div>
     </div>
 
+    <div v-if="detail?.personas?.length" class="card">
+      <div class="card-h">
+        <div class="card-t">人格贡献</div>
+        <div class="spacer"></div>
+        <div class="card-s">这份分数由哪些人格挣来（角色合并后会不止一个）</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>人格</th>
+            <th style="width: 90px">贡献</th>
+            <th style="width: 80px">事件</th>
+            <th style="width: 110px">最近</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in detail?.personas || []" :key="item.persona_id">
+            <td class="mono">{{ item.persona_id }}</td>
+            <td class="mono" :class="item.delta >= 0 ? 'pos' : 'neg'">{{ signed(item.delta) }}</td>
+            <td class="mono">{{ item.events }}</td>
+            <td class="faint">{{ timeAgo(item.last_at) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="card">
       <div class="card-h">
         <div class="card-t">事件流水</div>
@@ -192,6 +218,7 @@ function saved() {
             <td class="mono" :class="event.delta >= 0 ? 'pos' : 'neg'">{{ signed(event.delta) }}</td>
             <td class="muted">
               {{ event.source }}
+              <span v-if="event.persona_id" class="faint">· {{ event.persona_id }}</span>
               <span v-if="event.operator" class="faint">· {{ event.operator }}</span>
               <span v-if="event.group_name" class="faint">· {{ event.group_name }}</span>
               <span v-if="event.evidence" class="faint">· {{ event.evidence }}</span>

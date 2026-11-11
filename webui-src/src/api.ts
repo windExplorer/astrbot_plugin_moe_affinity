@@ -182,6 +182,7 @@ export interface UserDetail {
   snapshot?: UserRow & { peak: number; revision: number; stage_floor: number };
   series?: { day: string; delta: number; events: number }[];
   groups?: { group_id: string; group_name: string; delta: number; events: number; last_at: number }[];
+  personas?: { persona_id: string; delta: number; events: number; last_at: number }[];
   events?: {
     id: number;
     code: string;
@@ -192,6 +193,7 @@ export interface UserDetail {
     operator: string;
     evidence: string;
     group_id: string;
+    persona_id: string;
     group_name: string;
     created_at: number;
   }[];

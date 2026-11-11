@@ -936,9 +936,16 @@ class AffinityStore:
             ).fetchall()
             events = conn.execute(
                 "SELECT e.id, e.code, e.delta, e.before, e.after, e.source, e.operator,"
-                " e.evidence, e.group_id, e.created_at, g.name AS group_name"
+                " e.evidence, e.group_id, e.persona_id, e.created_at, g.name AS group_name"
                 " FROM events e LEFT JOIN groups g ON g.group_id = e.group_id"
                 " WHERE e.role_id = ? AND e.user_id = ? ORDER BY e.id DESC LIMIT 50",
+                (role_id, user_id),
+            ).fetchall()
+            personas = conn.execute(
+                "SELECT e.persona_id, SUM(e.delta) AS delta, COUNT(*) AS events,"
+                " MAX(e.created_at) AS last_at"
+                " FROM events e WHERE e.role_id = ? AND e.user_id = ? AND e.persona_id <> ''"
+                " GROUP BY e.persona_id ORDER BY delta DESC",
                 (role_id, user_id),
             ).fetchall()
             total_delta = conn.execute(
@@ -951,6 +958,7 @@ class AffinityStore:
             "snapshot": snapshot,
             "series": [dict(item) for item in series],
             "groups": [dict(item) for item in groups],
+            "personas": [dict(item) for item in personas],
             "events": [dict(item) for item in events],
             "group_delta_total": round(float(total_delta), 1),
         }
