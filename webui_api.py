@@ -26,6 +26,8 @@ try:  # quart 是 AstrBot 的运行期依赖
 except Exception:  # pragma: no cover - 仅本地静态检查时缺失
     request = None  # type: ignore
 
+from . import migrate_self_learning
+
 ROUTE_PREFIX = "/astrbot_plugin_moe_affinity"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
@@ -357,6 +359,176 @@ async def h_set_config(plugin) -> dict:
     return ok({"changed": changed})
 
 
+async def h_roles_personas(plugin) -> dict:
+    """角色 ↔ 人格映射，并标出哪个人格已经从 AstrBot 里删掉。"""
+    mapping = {item["persona_id"]: item["role_id"] for item in plugin.store.role_personas()}
+    alive: set[str] = set()
+    try:
+        manager = getattr(plugin.context, "persona_manager", None)
+        for persona in getattr(manager, "personas_v3", []) or []:
+            name = str(persona.get("name") or "")
+            if name:
+                alive.add(name)
+    except Exception:
+        pass
+    names = {item["role_id"]: item["display_name"] for item in plugin.store.list_roles()}
+    items = [
+        {
+            "persona_id": persona_id,
+            "role_id": role_id,
+            "role_name": names.get(role_id, role_id),
+            "persona_exists": persona_id in alive,
+        }
+        for persona_id, role_id in mapping.items()
+    ]
+    return ok({"items": items, "alive": sorted(alive)})
+
+
+async def h_role_rename(plugin) -> dict:
+    body = await _payload()
+    role_id = str(body.get("role_id") or "").strip()
+    name = str(body.get("name") or "").strip()
+    if not role_id or not name:
+        return err("缺少 role_id 或 name")
+    if not plugin.store.rename_role(role_id, name):
+        return err("角色不存在")
+    return ok({"role_id": role_id, "name": name})
+
+
+async def h_role_merge(plugin) -> dict:
+    body = await _payload()
+    target = str(body.get("target") or "").strip()
+    source = str(body.get("source") or "").strip()
+    if not target or not source:
+        return err("缺少 target 或 source")
+    if target == source:
+        return err("不能把角色并到自己身上")
+    result = plugin.store.merge_roles(target, source, strategy="max")
+    return ok(result)
+
+
+def _legacy_db_path(plugin, explicit: str | None = None) -> Path | None:
+    """定位自我学习插件的老库；优先用它的配置 messages_db_path。"""
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.is_file() else None
+    try:
+        star = plugin.context.get_registered_star("astrbot_plugin_self_learning")
+        conf = getattr(star, "config", None) if star else None
+        if isinstance(conf, dict):
+            configured = str(conf.get("messages_db_path") or "").strip()
+            if configured:
+                path = Path(configured).expanduser()
+                if path.is_file():
+                    return path
+    except Exception:
+        pass
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+    except Exception:
+        return None
+    base = Path(get_astrbot_data_path()) / "plugin_data"
+    return migrate_self_learning.resolve_db_path(None, base / "astrbot_plugin_self_learning")
+
+
+async def h_migrate_preview(plugin) -> dict:
+    path = _legacy_db_path(plugin, _q("path"))
+    if path is None:
+        return ok(
+            {
+                "exists": False,
+                "db_path": "",
+                "items": [],
+                "totals": {"users": 0, "pending": 0, "imported": 0},
+                "message": "没找到自我学习插件的 messages.db，可在下方手动填写路径。",
+            }
+        )
+    try:
+        legacy = migrate_self_learning.read_legacy(path)
+    except Exception as exc:
+        return ok(
+            {
+                "exists": True,
+                "db_path": str(path),
+                "items": [],
+                "totals": {"users": 0, "pending": 0, "imported": 0},
+                "message": f"读取失败：{exc}（若它用的是 MySQL 而不是 SQLite，则不支持自动迁移）",
+            }
+        )
+    plan = migrate_self_learning.build_plan(legacy, plugin._rules().max_score)
+    imported = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
+    for item in plan:
+        item["imported"] = item["user_id"] in imported
+    pending = sum(1 for item in plan if not item["imported"])
+    return ok(
+        {
+            "exists": True,
+            "db_path": str(path),
+            "items": plan,
+            "totals": {"users": len(plan), "pending": pending, "imported": len(plan) - pending},
+            "message": "",
+        }
+    )
+
+
+async def h_migrate_apply(plugin) -> dict:
+    body = await _payload()
+    path = _legacy_db_path(plugin, str(body.get("path") or "") or None)
+    if path is None:
+        return err("没找到老库文件")
+    role = _resolve_role(plugin, str(body.get("role") or ""))
+    wanted = body.get("user_ids")
+    wanted_set = {str(item) for item in wanted} if isinstance(wanted, list) else None
+    try:
+        legacy = migrate_self_learning.read_legacy(path)
+    except Exception as exc:
+        return err(f"读取老库失败: {exc}")
+    plan = migrate_self_learning.build_plan(legacy, plugin._rules().max_score)
+    imported_ids = plugin.store.imported_user_ids(migrate_self_learning.DEDUPE_PREFIX)
+    imported = skipped = 0
+    errors: list[str] = []
+    for item in plan:
+        user_id = item["user_id"]
+        if wanted_set is not None and user_id not in wanted_set:
+            continue
+        if user_id in imported_ids:
+            skipped += 1
+            continue
+        if item["target_score"] <= 0:
+            skipped += 1
+            continue
+        try:
+            plugin.store.apply_event(
+                role_id=role,
+                user_id=user_id,
+                code=migrate_self_learning.CODE,
+                delta=float(item["target_score"]),
+                source=migrate_self_learning.SOURCE,
+                rules=plugin._rules(),
+                evidence=migrate_self_learning.evidence_json(item),
+                dedupe_key=f"{migrate_self_learning.DEDUPE_PREFIX}{user_id}",
+                operator="migrate",
+            )
+            imported += 1
+        except Exception as exc:
+            errors.append(f"{user_id}: {exc}")
+    mood_cleared = 0
+    if bool(body.get("clear_mood")):
+        try:
+            mood_cleared = migrate_self_learning.clear_active_mood(path)
+        except Exception as exc:
+            errors.append(f"清理心情失败: {exc}")
+    return ok(
+        {
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
+            "mood_cleared": mood_cleared,
+            "role_id": role,
+        }
+    )
+
+
 async def h_sync_groups(plugin) -> dict:
     """从 OneBot 拉群列表补群名（aiocqhttp 专属，失败不影响控制台）。"""
     names: dict[str, str] = {}
@@ -399,6 +571,11 @@ def register_apis(plugin) -> None:
     routes: list[tuple[str, Callable[[Any], Awaitable[dict]], list[str]]] = [
         ("/ping", h_ping, ["GET"]),
         ("/roles", h_roles, ["GET"]),
+        ("/roles/personas", h_roles_personas, ["GET"]),
+        ("/roles/rename", h_role_rename, ["POST"]),
+        ("/roles/merge", h_role_merge, ["POST"]),
+        ("/migrate/preview", h_migrate_preview, ["GET"]),
+        ("/migrate/apply", h_migrate_apply, ["POST"]),
         ("/overview", h_overview, ["GET"]),
         ("/users", h_users, ["GET"]),
         ("/user", h_user, ["GET"]),

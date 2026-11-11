@@ -257,8 +257,48 @@ export interface ConflictRow {
 }
 
 // ---------------------------------------------------------------- 接口
+export interface RolePersonaRow {
+  persona_id: string;
+  role_id: string;
+  role_name: string;
+  persona_exists: boolean;
+}
+
+export interface MigrateItem {
+  user_id: string;
+  legacy_score: number;
+  legacy_max: number;
+  target_score: number;
+  groups: { group_id: string; score: number; limit: number }[];
+  group_count: number;
+  last_at: number;
+  imported: boolean;
+}
+
+export interface MigratePreview {
+  exists: boolean;
+  db_path: string;
+  items: MigrateItem[];
+  totals: { users: number; pending: number; imported: number };
+  message: string;
+}
+
 export const apiPing = () => apiGet<PingInfo>("/ping");
 export const apiRoles = () => apiGet<{ items: RoleRow[]; total: number }>("/roles");
+export const apiRolePersonas = () =>
+  apiGet<{ items: RolePersonaRow[]; alive: string[] }>("/roles/personas");
+export const apiRenameRole = (role_id: string, name: string) =>
+  apiPost<{ role_id: string; name: string }>("/roles/rename", { role_id, name });
+export const apiMergeRoles = (target: string, source: string) =>
+  apiPost<{ status: string; moved: number; merged: number }>("/roles/merge", { target, source });
+export const apiMigratePreview = (path = "") =>
+  apiGet<MigratePreview>(`/migrate/preview${path ? `?path=${encodeURIComponent(path)}` : ""}`, 60000);
+export const apiMigrateApply = (body: {
+  role: string;
+  user_ids?: string[];
+  clear_mood?: boolean;
+  path?: string;
+}) => apiPost<{ imported: number; skipped: number; errors: string[]; mood_cleared: number }>("/migrate/apply", body, 120000);
 export const apiOverview = (role: string, days = 30) =>
   apiGet<OverviewData>(`/overview?role=${encodeURIComponent(role)}&days=${days}`);
 export const apiUsers = (params: {

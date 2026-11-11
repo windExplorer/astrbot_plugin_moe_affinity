@@ -630,6 +630,37 @@ class AffinityStore:
                 )
         return len(mapping)
 
+    def rename_role(self, role_id: str, name: str) -> bool:
+        with self._db() as conn:
+            row = conn.execute("SELECT 1 FROM roles WHERE role_id = ?", (role_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute(
+                "UPDATE roles SET display_name = ?, updated_at = ? WHERE role_id = ?",
+                (str(name or role_id), int(time.time()), role_id),
+            )
+        return True
+
+    def role_personas(self) -> list[dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT persona_id, role_id, added_at FROM role_personas ORDER BY added_at ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def imported_user_ids(self, prefix: str) -> set[str]:
+        """已导入过的 user_id（dedupe_key 形如 ``<prefix><user_id>``）。"""
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT dedupe_key FROM events WHERE source = ? AND dedupe_key LIKE ?",
+                (prefix.rstrip(":"), prefix + "%"),
+            ).fetchall()
+        return {
+            str(row["dedupe_key"])[len(prefix):]
+            for row in rows
+            if row["dedupe_key"]
+        }
+
     def _settle_role(self, conn: sqlite3.Connection, role_id: str, rules: Rules, now: int) -> None:
         rows = conn.execute(
             "SELECT user_id, score, last_settled_at FROM affinities WHERE role_id = ?", (role_id,)

@@ -64,6 +64,7 @@ $includeList = @(
     "store.py",
     "scoring.py",
     "personas.py",
+    "migrate_self_learning.py",
     "webui_api.py",
     "pages",
     "_conf_schema.json",

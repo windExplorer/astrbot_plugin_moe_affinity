@@ -229,6 +229,66 @@ def test_console_queries():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_migration():
+    print("[migration]")
+    import sqlite3
+
+    import migrate_self_learning as mig
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_migrate_"))
+    try:
+        db_path = tmp / "messages.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                "CREATE TABLE user_affections(id INTEGER PRIMARY KEY, group_id TEXT, user_id TEXT,"
+                " affection_level INTEGER, max_affection INTEGER, created_at INTEGER, updated_at INTEGER);"
+                "CREATE TABLE bot_mood(id INTEGER PRIMARY KEY, group_id TEXT, mood_type TEXT, is_active INTEGER);"
+            )
+            conn.executemany(
+                "INSERT INTO user_affections(group_id, user_id, affection_level, max_affection,"
+                " created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                [
+                    ("g1", "u1", 20, 100, 1, 100),
+                    ("g2", "u1", 80, 100, 1, 200),  # 同一用户取最高
+                    ("g1", "u2", 50, 100, 1, 150),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO bot_mood(group_id, mood_type, is_active) VALUES(?,?,?)",
+                [("g1", "angry", 1), ("g2", "happy", 0)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        legacy = mig.read_legacy(db_path)
+        check("按用户聚合为 2 条", len(legacy) == 2, str(legacy))
+        best = next(item for item in legacy if item["user_id"] == "u1")
+        check("同一用户取最高分", best["best_score"] == 80, str(best))
+        check("保留全部群记录", len(best["groups"]) == 2, str(best["groups"]))
+
+        plan = mig.build_plan(legacy, 1000)
+        mapped = {item["user_id"]: item["target_score"] for item in plan}
+        check("比例换算 80/100 -> 800", mapped["u1"] == 800, str(mapped))
+        check("比例换算 50/100 -> 500", mapped["u2"] == 500, str(mapped))
+        check("换算后不超上限", all(item["target_score"] <= 1000 for item in plan))
+
+        evidence = json.loads(mig.evidence_json(plan[0]))
+        check("evidence 记录来源与群明细", evidence["from"] == "self_learning" and evidence["groups"], str(evidence))
+
+        cleared = mig.clear_active_mood(db_path)
+        check("只清理活跃心情 1 条", cleared == 1, str(cleared))
+        conn = sqlite3.connect(db_path)
+        try:
+            left = conn.execute("SELECT COUNT(*) FROM bot_mood WHERE is_active = 1").fetchone()[0]
+        finally:
+            conn.close()
+        check("清理后无活跃心情", left == 0, str(left))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_schema()
     test_stage()
@@ -236,6 +296,7 @@ def main():
     test_scoring()
     test_store()
     test_console_queries()
+    test_migration()
     print()
     if FAILED:
         print(f"RESULT: FAIL ({len(FAILED)}): " + ", ".join(FAILED))

@@ -11,25 +11,41 @@
 import asyncio
 import importlib
 import json
+import re
 import time
 from datetime import datetime
+from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import personas, scoring, store, webui_api
+from . import migrate_self_learning, personas, scoring, store, webui_api
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
-PLUGIN_VERSION = "v0.2.0"  # 与 metadata.yaml 同步
 API_VERSION = "affinity.v1"
+
+
+def _read_plugin_version() -> str:
+    """版本号唯一来源是 metadata.yaml；不要在代码里手写第二份（v0.3.0 曾因此显示成 v0.2.0）。"""
+    try:
+        text = (Path(__file__).resolve().parent / "metadata.yaml").read_text(encoding="utf-8")
+        matched = re.search(r"(?m)^\s*version:\s*\"?([^\"#\r\n]+?)\"?\s*(?:#.*)?$", text)
+        if matched:
+            return matched.group(1).strip()
+    except Exception:
+        pass
+    return "v0.0.0"
+
+
+PLUGIN_VERSION = _read_plugin_version()
 MARKER = "<affinity_context>"
 SKIP_SCORING = "moe_affinity_skip_scoring"
 
 
 def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
-    for module in (store, scoring, personas, webui_api):
+    for module in (store, scoring, personas, migrate_self_learning, webui_api):
         try:
             importlib.reload(module)
         except Exception as exc:  # 重载失败不应让插件装不上

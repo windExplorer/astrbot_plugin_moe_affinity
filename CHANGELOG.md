@@ -1,5 +1,42 @@
 # 更新日志
 
+## v0.4.0 (2026-11-11)
+
+新增角色管理页与自我学习插件迁移；顺手修掉「webui 与 @register 版本号不一致」。
+
+**角色管理（`#/roles`）**
+
+- 角色列表：改显示名、查看人格数与用户数。
+- **合并角色**：把一个人格角色并入另一个，同一用户的两份分数**取最高**（与迁移口径一致），
+  被并入角色的映射与数据整体移走；后端 `store.merge_roles` 写 `source=merge` 的 `manual.merge` 事件，
+  因此合并也能在审计页看到。
+- 「人格 → 角色」映射表标出人格是否已从 AstrBot 删除：删人格不会丢分数，映射继续保留。
+
+**迁移（`#/data` + `migrate_self_learning.py`）**
+
+- 只读自我学习插件的 `messages.db`（`user_affections` / `bot_mood`），不改对方数据。
+- 路径解析顺序：页面手填 → 对方配置 `messages_db_path` → `data/plugin_data/astrbot_plugin_self_learning/messages.db`。
+- **按用户取最高**：老库是 per_group，同一人多个群各一条，导入到我们的「角色 × 用户」时取最高那条，
+  其余群的明细整条塞进事件 `evidence` 留档。
+- **比例换算**：`老分 / 老上限 × 我们的上限`（老库 100 分制 → 我们 1000 分制，80 分变成 800）。
+- 逐人勾选、只导未导入、`dedupe_key=import:self_learning:<uid>` 保证重复点击不会双计。
+- 可选「把残留心情置为非活跃」：只 `UPDATE bot_mood SET is_active=0`，保留历史行。
+- 迁移异常（例如对方用的是 MySQL 而不是 SQLite）会转成页面提示，不抛 500。
+
+**修复**
+
+- `@register` 展示的版本号此前硬编码且漏更新（v0.3.0 包实际显示 v0.2.0），
+  改为启动时从 `metadata.yaml` 读取，消除第二份版本号。
+
+**其它**
+
+- `build_zip.ps1` 的 `$includeList` 增加 `migrate_self_learning.py`；
+  `_reload_sibling_modules` 同步加入该模块。
+- `tests/test_core.py` 增加迁移用例：按用户取最高、群明细保留、比例换算、上限夹紧、
+  evidence 结构、只清理活跃心情。
+
+版本 v0.3.0 -> v0.4.0。
+
 ## v0.3.0 (2026-11-11)
 
 新增 WebUI 控制台：用户 / 群聊 / 排行 / 总览图表 / 配置 / 审计，可直接在面板上改分。
