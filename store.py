@@ -33,6 +33,19 @@ STAGE_TABLE: tuple[tuple[int, str, str], ...] = (
 
 TOP_STAGE_AT = STAGE_TABLE[0][0]
 
+# 事件码 → 中文名（指令输出与控制台共用一套说法）
+CODE_LABELS: dict[str, str] = {
+    "chat.daily_first": "每日首次",
+    "chat.message": "聊天",
+    "chat.attention": "被叫",
+    "chat.praise": "夸奖",
+    "chat.negative": "不愉快",
+    "manual.adjust": "管理员调整",
+    "manual.reset": "重置",
+    "manual.merge": "角色归并",
+    "import.seed": "迁移导入",
+}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS roles (
     role_id     TEXT PRIMARY KEY,

@@ -520,7 +520,8 @@ class MoeAffinityPlugin(Star):
                 yield event.plain_result("普通成员只能查看自己的好感度。")
                 return
             snapshot = await asyncio.to_thread(self.store.snapshot, role_id, target, rules)
-            yield event.plain_result(self._render_detail(snapshot, title=f"{target} 与「{role_id}」的关系"))
+            target_name = str(snapshot.get("display_name") or "").strip() or target
+            yield event.plain_result(self._render_detail(snapshot, title=f"「{target_name}」的好感度"))
             return
 
         if not sender:
@@ -528,19 +529,16 @@ class MoeAffinityPlugin(Star):
             return
         snapshot = await asyncio.to_thread(self.store.snapshot, role_id, sender, rules)
         recent = await asyncio.to_thread(self.store.recent_events, role_id, sender, 3)
-        text = self._render_detail(snapshot, title=f"你与「{role_id}」的关系")
+        # 标题用「谁的好感度」而不是人格/角色名：用户看不懂 persona id
+        name = (
+            str(event.get_sender_name() or "").strip()
+            or str(snapshot.get("display_name") or "").strip()
+            or sender
+        )
+        text = self._render_detail(snapshot, title=f"「{name}」的好感度")
         if recent:
-            labels = {
-                "chat.daily_first": "日常问候",
-                "chat.message": "聊天",
-                "chat.attention": "叫你",
-                "chat.praise": "夸奖",
-                "chat.negative": "不愉快",
-                "manual.adjust": "管理员调整",
-                "manual.reset": "重置",
-            }
             parts = [
-                f"{labels.get(item['code'], item['code'])} {int(item['delta']):+d}"
+                f"{store.CODE_LABELS.get(item['code'], item['code'])} {int(item['delta']):+d}"
                 for item in recent
             ]
             text += "\n最近：" + " · ".join(parts)
