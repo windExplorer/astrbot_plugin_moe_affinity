@@ -54,7 +54,7 @@ def read_legacy(db_path: Path) -> list[dict[str, Any]]:
     try:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT group_id, user_id, affection_level, max_affection, updated_at"
+            "SELECT group_id, user_id, affection_level, max_affection, created_at, updated_at"
             " FROM user_affections"
         ).fetchall()
     finally:
@@ -71,8 +71,11 @@ def read_legacy(db_path: Path) -> list[dict[str, Any]]:
         entry = by_user.setdefault(
             user_id,
             {"user_id": user_id, "ratio": 0.0, "best_score": 0.0, "best_limit": limit,
-             "last_at": 0, "groups": []},
+             "last_at": 0, "first_at": 0, "groups": []},
         )
+        created = int(row["created_at"] or 0)
+        if created > 0 and (entry["first_at"] == 0 or created < entry["first_at"]):
+            entry["first_at"] = created
         entry["groups"].append(
             {"group_id": str(row["group_id"] or ""), "score": round(score, 1), "limit": round(limit, 1)}
         )
@@ -102,6 +105,7 @@ def build_plan(legacy_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "target_score": max(0, target),
                 "groups": row["groups"],
                 "group_count": len(row["groups"]),
+                "first_at": int(row.get("first_at") or 0),
                 "last_at": int(row["last_at"]),
             }
         )

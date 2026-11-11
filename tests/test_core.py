@@ -384,6 +384,20 @@ def test_identity_cache():
         unnamed = db.groups_without_name()
         check("缺名群可列出", unnamed == ["456"], str(unnamed))
 
+        # 认识时间：建档时可指定，repair 只往早修
+        seen = db.apply_event(
+            role_id=role, user_id="30000", code="import.seed", delta=10,
+            source="import:self_learning", rules=rules, first_seen_at=1000, now=20000,
+        )
+        check("建档时可用历史时间", seen["first_seen_at"] == 1000, str(seen["first_seen_at"]))
+        moved = db.repair_first_seen(role, {"30000": 500})
+        check("回填可提前", moved == 1 and db.snapshot(role, "30000", rules)["first_seen_at"] == 500)
+        check(
+            "回填不会推后",
+            db.repair_first_seen(role, {"30000": 999999}) == 0
+            and db.snapshot(role, "30000", rules)["first_seen_at"] == 500,
+        )
+
         db.put_avatars({"user:10086": "data:image/jpeg;base64,AAA"})
         got = db.get_avatars(["user:10086", "user:999"])
         check("头像缓存命中", got.get("user:10086", "").startswith("data:image"), str(got))
@@ -461,9 +475,9 @@ def test_migration():
                 "INSERT INTO user_affections(group_id, user_id, affection_level, max_affection,"
                 " created_at, updated_at) VALUES(?,?,?,?,?,?)",
                 [
-                    ("g1", "u1", 20, 100, 1, 100),
-                    ("g2", "u1", 80, 100, 1, 200),  # 同一用户取最高
-                    ("g1", "u2", 50, 100, 1, 150),
+                    ("g1", "u1", 20, 100, 100, 100),
+                    ("g2", "u1", 80, 100, 150, 200),  # 同一用户取最高
+                    ("g1", "u2", 50, 100, 300, 150),
                 ],
             )
             conn.executemany(
@@ -485,6 +499,8 @@ def test_migration():
         check("比例换算 80/100 -> 800", mapped["u1"] == 800, str(mapped))
         check("比例换算 50/100 -> 500", mapped["u2"] == 500, str(mapped))
         check("换算不做上限裁剪", all(item["target_score"] >= 0 for item in plan))
+        firsts = {item["user_id"]: item["first_at"] for item in plan}
+        check("取最早创建时间为认识时间", firsts["u1"] == 100 and firsts["u2"] == 300, str(firsts))
 
         evidence = json.loads(mig.evidence_json(plan[0]))
         check("evidence 记录来源与群明细", evidence["from"] == "self_learning" and evidence["groups"], str(evidence))

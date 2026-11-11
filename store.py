@@ -422,9 +422,14 @@ class AffinityStore:
         dedupe_key: str | None = None,
         operator: str = "",
         display_name: str = "",
+        first_seen_at: int | None = None,
         now: int | None = None,
     ) -> dict[str, Any]:
-        """记一条事件并更新聚合分数。返回快照 + 本事件的实际生效增量。"""
+        """记一条事件并更新聚合分数。返回快照 + 本事件的实际生效增量。
+
+        ``first_seen_at`` 只在**首次建档**时生效（迁移时可以传老库的首次互动时间，
+        否则「认识 N 天」会从导入那一刻重新算）。
+        """
         if not role_id or not user_id:
             return {"status": "invalid", "message": "role_id / user_id 不能为空"}
         moment = int(now if now is not None else time.time())
@@ -435,11 +440,15 @@ class AffinityStore:
                 (role_id, user_id),
             ).fetchone()
             if row is None:
+                seen = moment
+                if first_seen_at is not None:
+                    # 不能晚于现在，也不能是未来时间
+                    seen = max(0, min(int(first_seen_at), moment)) or moment
                 conn.execute(
                     "INSERT INTO affinities(role_id, user_id, platform, display_name, score, peak,"
                     " revision, first_seen_at, last_interaction_at, last_settled_at)"
                     " VALUES(?,?,?,?,0,0,0,?,?,?)",
-                    (role_id, user_id, platform, display_name, moment, moment, moment),
+                    (role_id, user_id, platform, display_name, seen, moment, moment),
                 )
                 row = conn.execute(
                     "SELECT * FROM affinities WHERE role_id = ? AND user_id = ?",
@@ -826,6 +835,25 @@ class AffinityStore:
                     "UPDATE affinities SET display_name = ?"
                     " WHERE user_id = ? AND display_name <> ?",
                     (text, uid, text),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
+
+    def repair_first_seen(self, role_id: str, mapping: dict[str, int]) -> int:
+        """把「认识时间」往更早的方向修（只提前、不推后），用于补齐迁移数据。"""
+        if not mapping:
+            return 0
+        updated = 0
+        with self._db() as conn:
+            for user_id, first_at in mapping.items():
+                stamp = int(first_at or 0)
+                if stamp <= 0:
+                    continue
+                cursor = conn.execute(
+                    "UPDATE affinities SET first_seen_at = ?"
+                    " WHERE role_id = ? AND user_id = ?"
+                    " AND (first_seen_at = 0 OR first_seen_at > ?)",
+                    (stamp, role_id, user_id, stamp),
                 )
                 updated += int(cursor.rowcount or 0)
         return updated

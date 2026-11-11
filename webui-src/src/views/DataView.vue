@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { apiMigrateApply, apiMigratePreview, apiRoles, type MigratePreview, type RoleRow } from "../api";
+import {
+  apiMigrateApply,
+  apiMigratePreview,
+  apiMigrateRepair,
+  apiRoles,
+  type MigratePreview,
+  type RoleRow,
+} from "../api";
 import { app, notify } from "../state";
 import { timeAgo } from "../lib/format";
 
@@ -98,6 +105,26 @@ async function apply() {
   }
 }
 
+async function repairTime() {
+  if (!target.value) {
+    notify("先选一个角色", true);
+    return;
+  }
+  busy.value = true;
+  try {
+    const res = await apiMigrateRepair({ role: target.value, path: path.value.trim() || undefined });
+    notify(
+      res.message || `已回填 ${res.repaired} 人的认识时间（候选 ${res.candidates} 人）`,
+      !res.message && res.repaired === 0,
+    );
+    await load();
+  } catch (e: any) {
+    notify(e?.message || String(e), true);
+  } finally {
+    busy.value = false;
+  }
+}
+
 const pendingCount = computed(
   () => (preview.value?.items || []).filter((item) => !item.imported).length,
 );
@@ -163,6 +190,7 @@ onMounted(load);
       <n-button size="small" quaternary @click="toggleAll">
         {{ allSelected ? "全不选" : "全选未导入" }}
       </n-button>
+      <n-button size="small" quaternary :loading="busy" @click="repairTime">回填认识时间</n-button>
       <n-button size="small" type="primary" :loading="busy" :disabled="!selected.size" @click="apply">
         导入选中（{{ selected.size }}）
       </n-button>

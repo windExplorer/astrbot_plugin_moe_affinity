@@ -616,6 +616,7 @@ async def h_migrate_apply(plugin) -> dict:
                 evidence=migrate_self_learning.evidence_json(item),
                 dedupe_key=migrate_self_learning.dedupe_key(role, user_id),
                 operator="migrate",
+                first_seen_at=item.get("first_at") or None,
             )
             imported += 1
         except Exception as exc:
@@ -650,6 +651,37 @@ def _aiocqhttp_platforms(plugin) -> list:
         except Exception:
             continue
     return out
+
+
+async def h_migrate_repair(plugin) -> dict:
+    """回填「认识时间」：用老库的 created_at 把已导入用户的 first_seen_at 往早修。
+
+    只提前、不推后，也不动分数与流水——纯粹修展示层的「认识 N 天」。
+    """
+    body = await _payload()
+    path = _legacy_db_path(plugin, str(body.get("path") or "") or None)
+    if path is None:
+        return err("没找到老库文件")
+    role = _resolve_role(plugin, str(body.get("role") or ""))
+    try:
+        legacy = migrate_self_learning.read_legacy(path)
+    except Exception as exc:
+        return err(f"读取老库失败: {exc}")
+    plan = migrate_self_learning.build_plan(legacy)
+    mapping = {
+        item["user_id"]: int(item["first_at"])
+        for item in plan
+        if int(item.get("first_at") or 0) > 0
+    }
+    repaired = plugin.store.repair_first_seen(role, mapping)
+    return ok(
+        {
+            "role_id": role,
+            "candidates": len(mapping),
+            "repaired": repaired,
+            "message": "没有可回填的时间" if not mapping else "",
+        }
+    )
 
 
 async def h_sync(plugin) -> dict:
@@ -848,6 +880,7 @@ def register_apis(plugin) -> None:
         ("/roles/merge", h_role_merge, ["POST"]),
         ("/migrate/preview", h_migrate_preview, ["GET"]),
         ("/migrate/apply", h_migrate_apply, ["POST"]),
+        ("/migrate/repair", h_migrate_repair, ["POST"]),
         ("/overview", h_overview, ["GET"]),
         ("/users", h_users, ["GET"]),
         ("/user", h_user, ["GET"]),

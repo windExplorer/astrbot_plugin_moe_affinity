@@ -371,6 +371,13 @@ export const apiMigratePreview = (path = "", role = "") => {
   const qs = p.toString();
   return apiGet<MigratePreview>(`/migrate/preview${qs ? `?${qs}` : ""}`, 60000);
 };
+export const apiMigrateRepair = (body: { role: string; path?: string }) =>
+  apiPost<{ role_id: string; candidates: number; repaired: number; message: string }>(
+    "/migrate/repair",
+    body,
+    120000,
+  );
+
 export const apiMigrateApply = (body: {
   role: string;
   user_ids?: string[];
