@@ -210,3 +210,7 @@ __marimo__/
 webui-src/node_modules/
 webui-src/src/version.ts
 
+
+# Vite temp config bundles
+webui-src/vite.config.ts.timestamp-*
+
