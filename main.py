@@ -309,7 +309,19 @@ class MoeAffinityPlugin(Star):
         parts = text.split(None, 1)
         return parts[1].strip() if len(parts) > 1 else ""
 
-    def _render_detail(self, snapshot: dict, *, title: str) -> str:
+    @staticmethod
+    def _mood_line(mood_view: dict | None) -> str:
+        if not mood_view or not mood_view.get("enabled", True):
+            return ""
+        axes = mood_view.get("axes") or {}
+        desc = str(mood_view.get("description") or "平静")
+        detail = (
+            f"喜悦 {axes.get('joy', '—')} · 烦躁 {axes.get('anger', '—')} · "
+            f"低落 {axes.get('sorrow', '—')} · 不安 {axes.get('fear', '—')}"
+        )
+        return f"心情：{desc}（{detail}）"
+
+    def _render_detail(self, snapshot: dict, *, title: str, mood_view: dict | None = None) -> str:
         if snapshot.get("status") != "ok":
             return f"{title}\n暂无好感度记录（还没聊过，或数据未就绪）。"
         now = int(time.time())
@@ -322,12 +334,16 @@ class MoeAffinityPlugin(Star):
             need = max(0, int(round(float(next_at) - float(snapshot["score"]))))
             if need > 0:
                 gap_to_next = f"（距{next_label}还差 {need}）"
-        return (
-            f"{title}\n"
-            f"{int(snapshot['score'])} 分 · {snapshot['stage_label']}{gap_to_next}\n"
-            f"本角色第 {snapshot['rank']} 名\n"
-            f"认识 {days} 天 · 最近互动 {gap}"
-        )
+        lines = [
+            title,
+            f"{int(snapshot['score'])} 分 · {snapshot['stage_label']}{gap_to_next}",
+            f"本角色第 {snapshot['rank']} 名",
+            f"认识 {days} 天 · 最近互动 {gap}",
+        ]
+        mood_line = self._mood_line(mood_view)
+        if mood_line:
+            lines.append(mood_line)
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 计分
     @filter.after_message_sent()
@@ -525,7 +541,10 @@ class MoeAffinityPlugin(Star):
             title = (
                 f"{target_name} 与「{alias}」的关系" if alias else f"「{target_name}」的好感度"
             )
-            yield event.plain_result(self._render_detail(snapshot, title=title))
+            mood_view = await asyncio.to_thread(self._mood_view, role_id)
+            yield event.plain_result(
+                self._render_detail(snapshot, title=title, mood_view=mood_view)
+            )
             return
 
         if not sender:
@@ -542,7 +561,8 @@ class MoeAffinityPlugin(Star):
         )
         alias = await asyncio.to_thread(self.store.role_alias, role_id)
         title = f"你与「{alias}」的关系" if alias else f"「{name}」的好感度"
-        text = self._render_detail(snapshot, title=title)
+        mood_view = await asyncio.to_thread(self._mood_view, role_id)
+        text = self._render_detail(snapshot, title=title, mood_view=mood_view)
         if recent:
             parts = [
                 f"{store.CODE_LABELS.get(item['code'], item['code'])} {int(item['delta']):+d}"
