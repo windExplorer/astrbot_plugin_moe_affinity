@@ -71,6 +71,7 @@ $includeList = @(
     "pages",
     "_conf_schema.json",
     "metadata.yaml",
+    "logo.png",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
