@@ -2,7 +2,165 @@
   "enabled": {
     "type": "bool",
     "description": "启用好感度中枢",
-    "hint": "当前为仓库骨架版本：即使开启也不会改变对话行为，数据表与对外契约尚未实现。",
-    "default": false
+    "hint": "总开关。关闭后不计分、不注入，但已有数据保留。",
+    "default": true
+  },
+  "affinity": {
+    "type": "object",
+    "description": "好感度数值",
+    "hint": "分数按角色×用户唯一，闲置衰减在读写时惰性结算。",
+    "items": {
+      "max_score": {
+        "type": "int",
+        "description": "分数上限",
+        "hint": "默认 1000。档位按比例划分：85% 羁绊 / 65% 亲密 / 45% 亲近 / 25% 熟悉 / 10% 眼熟。",
+        "default": 1000
+      },
+      "daily_gain_cap": {
+        "type": "int",
+        "description": "每日涨分上限",
+        "hint": "核心计分（聊天/被叫/夸奖）每天最多加这么多分，防止刷分。",
+        "default": 30
+      },
+      "daily_loss_cap": {
+        "type": "int",
+        "description": "每日扣分上限",
+        "hint": "负向互动每天最多扣这么多分（取正值填写）。管理员手动调整不受此限制。",
+        "default": 20
+      },
+      "decay_enabled": {
+        "type": "bool",
+        "description": "启用闲置衰减",
+        "hint": "关闭后分数只增不减。",
+        "default": true
+      },
+      "decay_grace_days": {
+        "type": "int",
+        "description": "衰减宽限天数",
+        "hint": "连续多少天没有有效互动时分数保持不变。",
+        "default": 3
+      },
+      "decay_early_per_day": {
+        "type": "int",
+        "description": "宽限后第 4-7 天每日衰减",
+        "default": 2
+      },
+      "decay_middle_per_day": {
+        "type": "int",
+        "description": "第 8-14 天每日衰减",
+        "default": 5
+      },
+      "decay_late_per_day": {
+        "type": "int",
+        "description": "第 15 天起每日衰减",
+        "default": 8
+      },
+      "merge_strategy": {
+        "type": "string",
+        "description": "角色归并时的分数策略",
+        "hint": "取最高：合并多个人格时保留较高的那份，不累加。",
+        "options": [
+          "max"
+        ],
+        "default": "max"
+      }
+    }
+  },
+  "scoring": {
+    "type": "object",
+    "description": "计分规则",
+    "hint": "负面命中时这一条不再产生任何正向分。",
+    "items": {
+      "daily_first": {
+        "type": "int",
+        "description": "每日首次对话加分",
+        "default": 2
+      },
+      "per_message": {
+        "type": "int",
+        "description": "每条有效对话加分",
+        "default": 1
+      },
+      "attention": {
+        "type": "int",
+        "description": "被 @ / 唤醒加分",
+        "default": 2
+      },
+      "praise_delta": {
+        "type": "int",
+        "description": "夸奖加分（需配置夸奖词才生效）",
+        "default": 3
+      },
+      "praise_keywords": {
+        "type": "list",
+        "description": "夸奖词表",
+        "hint": "默认空列表（关闭）。中文短词误判率高，建议只放明确词，如「最喜欢你」「好可爱」。",
+        "default": []
+      },
+      "negative_delta": {
+        "type": "int",
+        "description": "负向互动扣分",
+        "hint": "填负数，例如 -6。",
+        "default": -6
+      },
+      "negative_keywords": {
+        "type": "list",
+        "description": "负向词表",
+        "hint": "命中即扣分，且该条不再产生正向分。",
+        "default": [
+          "滚",
+          "傻逼",
+          "去死",
+          "讨厌你",
+          "闭嘴"
+        ]
+      }
+    }
+  },
+  "inject": {
+    "type": "object",
+    "description": "对话注入",
+    "hint": "只注入一段短文本，带 marker 去重，不会重复追加。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "把好感度注入对话",
+        "default": true
+      },
+      "show_score": {
+        "type": "bool",
+        "description": "注入时包含具体分数",
+        "hint": "关闭则只注入档位描述（亲近/熟悉等），更省 token。",
+        "default": true
+      },
+      "max_chars": {
+        "type": "int",
+        "description": "注入文本字数上限",
+        "default": 140
+      },
+      "include_hint": {
+        "type": "bool",
+        "description": "附带「不要播报分数、不是权限依据」的约束",
+        "default": true
+      }
+    }
+  },
+  "advanced": {
+    "type": "object",
+    "description": "高级",
+    "items": {
+      "dedupe_window_seconds": {
+        "type": "int",
+        "description": "同类事件去重窗口（秒）",
+        "hint": "同一个人短时间内连续触发同类事件只记一次，防止刷分。",
+        "default": 60
+      },
+      "log_events": {
+        "type": "bool",
+        "description": "在日志中打印每条计分事件",
+        "hint": "排障用，默认关闭以免刷屏。",
+        "default": false
+      }
+    }
   }
 }

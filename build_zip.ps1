@@ -61,6 +61,9 @@ if (Test-Path $zipPath) {
 # Keep this in sync with main.py's reload list when sibling modules are added.
 $includeList = @(
     "main.py",
+    "store.py",
+    "scoring.py",
+    "personas.py",
     "_conf_schema.json",
     "metadata.yaml",
     "README.md",

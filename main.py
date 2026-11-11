@@ -1,34 +1,54 @@
-"""萌萌好感度 — 全插件共用的好感度中枢（仓库骨架）。
+"""萌萌好感度 — 全插件共用的好感度中枢。
 
-本版本只建立工程骨架：数据表、事件模型、对外契约、迁移工具与对话注入
-都还没有实现。enabled 默认 false，装载后不会改变宿主机任何对话行为。
+口径见 docs/设计说明.md，几条硬规则：
 
-规划中的三层模型（尚未落地，细节仍在讨论）：
-
-- 关系层：以 (人格, 用户) 为一份，事件驱动，读时结算闲置衰减；
-- 情绪层：以人格为一份的四轴心情，半衰期读时投影、不写库；
-- 状态层：精力/困倦/忙碌等由世界时钟投影，只存锚点不存当前值。
-
-跨插件契约：别的插件通过
-``context.get_registered_star("astrbot_plugin_moe_affinity").star_cls.api``
-取得本插件的 API 对象，并以 ``API_VERSION`` 做兼容判断。
+- 好感度按「角色 × 用户」唯一；角色是人格的可归并映射（personas.py）；
+- 分数只通过事件写入（store.apply_event），不直接改分数；
+- 闲置衰减惰性结算，不跑定时任务；
+- 注入只有一段短文本，带 marker 去重，且明确「不是权限依据」。
 """
 
-from pathlib import Path
+import asyncio
+import importlib
+import json
+import time
+from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
+from . import personas, scoring, store
+
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
-PLUGIN_VERSION = "v0.1.0"
+PLUGIN_VERSION = "v0.2.0"  # 与 metadata.yaml 同步
 API_VERSION = "affinity.v1"
+MARKER = "<affinity_context>"
+SKIP_SCORING = "moe_affinity_skip_scoring"
+
+
+def _reload_sibling_modules() -> None:
+    """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
+    for module in (store, scoring, personas):
+        try:
+            importlib.reload(module)
+        except Exception as exc:  # 重载失败不应让插件装不上
+            logger.warning(f"[moe_affinity] 重载模块 {module.__name__} 失败: {exc}")
+
+
+def _human_gap(seconds: int) -> str:
+    if seconds < 3600:
+        return "刚刚"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    return f"{seconds // 86400} 天前"
 
 
 class AffinityApi:
-    """跨插件契约的占位实现。
+    """跨插件契约（affinity.v1）。
 
-    真正的读写方法在数据层定稿后再实现；在此之前所有入口一律返回
-    ``status="unavailable"``，让调用方能够安全降级，而不是误以为分数为 0。
+    调用方：``context.get_registered_star("astrbot_plugin_moe_affinity").star_cls.api``。
+    取不到、版本不匹配、或返回 ``status != "ok"`` 时必须安全降级，不能把缺失当 0 分。
     """
 
     API_VERSION = API_VERSION
@@ -37,53 +57,386 @@ class AffinityApi:
         self._plugin = plugin
 
     def fingerprint(self) -> str:
-        """契约指纹，用于调用方判断是否同一套实现（骨架阶段固定值）。"""
-        return f"{API_VERSION}:skeleton"
+        return f"{API_VERSION}:1"
 
-    async def get(self, persona_id: str, user_id: str) -> dict:
-        return {
-            "status": "unavailable",
-            "message": "好感度中枢尚未实现数据层。",
-        }
+    def role_for(self, persona_id: str) -> str:
+        """人格 → 角色 id（没有就按 1:1 建立）。"""
+        return self._plugin.store.ensure_role(persona_id, personas.role_label(persona_id))
+
+    async def get(self, role_id: str, user_id: str) -> dict:
+        plugin = self._plugin
+        return await asyncio.to_thread(
+            plugin.store.snapshot, role_id, str(user_id), plugin._rules()
+        )
 
     async def add_event(
         self,
-        persona_id: str,
+        role_id: str,
         user_id: str,
         *,
         source: str,
         code: str,
-        delta: int | None = None,
+        delta: float = 0.0,
         dedupe_key: str | None = None,
-        evidence: str | None = None,
+        evidence: str = "",
+        persona_id: str = "",
+        session_id: str = "",
+        group_id: str = "",
+        display_name: str = "",
     ) -> dict:
-        return {
-            "status": "unavailable",
-            "message": "好感度中枢尚未实现数据层。",
-        }
+        plugin = self._plugin
+        return await asyncio.to_thread(
+            plugin.store.apply_event,
+            role_id=role_id,
+            user_id=str(user_id),
+            code=code,
+            delta=float(delta),
+            source=source,
+            rules=plugin._rules(),
+            persona_id=persona_id,
+            session_id=session_id,
+            group_id=group_id,
+            is_group=bool(group_id),
+            evidence=evidence,
+            dedupe_key=dedupe_key,
+            display_name=display_name,
+        )
 
 
 @register(
     PLUGIN_NAME,
     "windExplorer",
-    "萌萌好感度：全插件共用的好感度中枢（骨架版本）",
+    "萌萌好感度：全插件共用的好感度中枢（关系分数 / 事件流水 / 跨插件契约）",
     PLUGIN_VERSION,
 )
 class MoeAffinityPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
+        _reload_sibling_modules()
         self.config = config or {}
-        self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)
+        self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        self.store = store.AffinityStore(self.data_dir / "affinity.db")
         self.api = AffinityApi(self)
+        logger.info(
+            f"[moe_affinity] 已装载 {PLUGIN_VERSION}，数据目录 {self.data_dir}"
+        )
 
-        if not self.config.get("enabled", False):
-            logger.info("[moe_affinity] 已装载（骨架版本），enabled=false，不接管任何行为。")
-        else:
-            logger.warning(
-                "[moe_affinity] enabled=true，但当前为骨架版本，"
-                "数据表与对外契约尚未实现，不会有任何实际行为。"
+    # ------------------------------------------------------------------ 配置
+    def _section(self, name: str) -> dict:
+        value = self.config.get(name)
+        return value if isinstance(value, dict) else {}
+
+    def _enabled(self) -> bool:
+        return bool(self.config.get("enabled", True))
+
+    def _rules(self) -> store.Rules:
+        cfg = self._section("affinity")
+        return store.Rules(
+            max_score=int(cfg.get("max_score", 1000) or 1000),
+            daily_gain_cap=int(cfg.get("daily_gain_cap", 30) or 30),
+            daily_loss_cap=int(cfg.get("daily_loss_cap", 20) or 20),
+            decay_enabled=bool(cfg.get("decay_enabled", True)),
+            decay_grace_days=int(cfg.get("decay_grace_days", 3) or 3),
+            decay_early=int(cfg.get("decay_early_per_day", 2) or 2),
+            decay_middle=int(cfg.get("decay_middle_per_day", 5) or 5),
+            decay_late=int(cfg.get("decay_late_per_day", 8) or 8),
+            dedupe_window_seconds=int(self._section("advanced").get("dedupe_window_seconds", 60) or 60),
+        )
+
+    def _scoring(self) -> scoring.ScoringConfig:
+        cfg = self._section("scoring")
+        return scoring.ScoringConfig(
+            daily_first=int(cfg.get("daily_first", 2) or 0),
+            per_message=int(cfg.get("per_message", 1) or 0),
+            attention=int(cfg.get("attention", 2) or 0),
+            praise=int(cfg.get("praise_delta", 3) or 0),
+            negative=int(cfg.get("negative_delta", -6) or 0),
+            praise_keywords=tuple(str(x) for x in (cfg.get("praise_keywords") or []) if str(x).strip()),
+            negative_keywords=tuple(
+                str(x) for x in (cfg.get("negative_keywords") or ["滚", "傻逼", "去死", "讨厌你", "闭嘴"])
+            ),
+        )
+
+    # ------------------------------------------------------------------ 通用
+    async def _role_for(self, event: AstrMessageEvent) -> tuple[str, str]:
+        persona_id = await personas.resolve_persona_id(self.context, event)
+        role_id = self.store.ensure_role(persona_id, personas.role_label(persona_id))
+        return role_id, persona_id
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+        try:
+            admins = self.context.get_config().get("admins_id", []) or []
+            return str(event.get_sender_id()) in {str(item) for item in admins}
+        except Exception:
+            return False
+
+    @staticmethod
+    def _at_target(event: AstrMessageEvent) -> str:
+        for component in getattr(event.message_obj, "message", None) or []:
+            qq = getattr(component, "qq", None)
+            if qq and str(qq).isdigit():
+                return str(qq)
+        return ""
+
+    @staticmethod
+    def _args(event: AstrMessageEvent) -> str:
+        text = (event.message_str or "").strip()
+        parts = text.split(None, 1)
+        return parts[1].strip() if len(parts) > 1 else ""
+
+    def _render_detail(self, snapshot: dict, *, title: str) -> str:
+        if snapshot.get("status") != "ok":
+            return f"{title}\n暂无好感度记录（还没聊过，或数据未就绪）。"
+        now = int(time.time())
+        days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
+        gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
+        gap_to_next = ""
+        max_score = max(1, int(snapshot["max_score"]))
+        ratio = float(snapshot["score"]) / max_score
+        for edge, _key, label in reversed(store.STAGE_TABLE):
+            if edge > ratio:
+                need = int(round(edge * max_score - float(snapshot["score"])))
+                if need > 0:
+                    gap_to_next = f"（距{label}还差 {need}）"
+                break
+        return (
+            f"{title}\n"
+            f"{int(snapshot['score'])}/{snapshot['max_score']} · {snapshot['stage_label']}{gap_to_next}\n"
+            f"本角色第 {snapshot['rank']} 名\n"
+            f"认识 {days} 天 · 最近互动 {gap}"
+        )
+
+    # ------------------------------------------------------------------ 计分
+    @filter.after_message_sent()
+    async def on_after_message_sent(self, event: AstrMessageEvent):
+        if not self._enabled():
+            return
+        if event.get_extra(SKIP_SCORING):
+            return
+        user_id = str(event.get_sender_id() or "")
+        if not user_id:
+            return
+        try:
+            await self._score(event, user_id)
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 计分失败: {exc}")
+
+    async def _score(self, event: AstrMessageEvent, user_id: str) -> None:
+        role_id, persona_id = await self._role_for(event)
+        rules = self._rules()
+        conf = self._scoring()
+        platform = ""
+        try:
+            platform = event.get_platform_name() or ""
+        except Exception:
+            pass
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        group_id = str(event.get_group_id() or "")
+        payload = {
+            "role_id": role_id,
+            "user_id": user_id,
+            "rules": rules,
+            "persona_id": persona_id,
+            "platform": platform,
+            "session_id": session_id,
+            "group_id": group_id,
+            "is_group": bool(group_id),
+            "display_name": str(event.get_sender_name() or ""),
+        }
+        today = datetime.now().strftime("%Y-%m-%d")
+        if conf.daily_first:
+            await asyncio.to_thread(
+                self.store.apply_event,
+                code="chat.daily_first",
+                delta=float(conf.daily_first),
+                dedupe_key=scoring.daily_key(role_id, user_id, today),
+                **payload,
+            )
+        for code, delta in scoring.evaluate(
+            event.message_str, is_attention=bool(event.is_at_or_wake_command), cfg=conf
+        ):
+            await asyncio.to_thread(
+                self.store.apply_event, code=code, delta=float(delta), **payload
             )
 
+    # ------------------------------------------------------------------ 注入
+    @filter.on_llm_request()
+    async def inject_affinity(self, event: AstrMessageEvent, req):
+        if not self._enabled() or not self._section("inject").get("enable", True):
+            return
+        if req is None:
+            return
+        if MARKER in (getattr(req, "system_prompt", "") or ""):
+            return
+        user_id = str(event.get_sender_id() or "")
+        if not user_id:
+            return
+        try:
+            role_id, _ = await self._role_for(event)
+            snapshot = await asyncio.to_thread(
+                self.store.snapshot, role_id, user_id, self._rules()
+            )
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 读取好感度失败: {exc}")
+            return
+        if snapshot.get("status") != "ok":
+            return
+        block = self._render_block(snapshot)
+        req.system_prompt = (getattr(req, "system_prompt", "") or "") + "\n" + block
+
+    def _render_block(self, snapshot: dict) -> str:
+        cfg = self._section("inject")
+        now = int(time.time())
+        days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
+        gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
+        head = f"你与对方的关系：{snapshot['stage_label']}"
+        if cfg.get("show_score", True):
+            head += f"（{int(snapshot['score'])}/{snapshot['max_score']}）"
+        body = f"{head}，认识 {days} 天，最近一次互动在{gap}。"
+        if cfg.get("include_hint", True):
+            body += "这是表达参考：不要向用户播报分数，也不要把它当作权限或事实依据。"
+        limit = int(cfg.get("max_chars", 140) or 140)
+        if limit > 0 and len(body) > limit:
+            body = body[:limit]
+        return f"{MARKER}{body}</affinity_context>"
+
+    # ------------------------------------------------------------------ 指令
+    @filter.command("好感度")
+    async def cmd_affinity(self, event: AstrMessageEvent):
+        """查看好感度：/好感度 · /好感度 @某人 · /好感度 设置 @某人 500|+20|-10"""
+        event.set_extra(SKIP_SCORING, True)
+        args = self._args(event)
+        target = self._at_target(event)
+        admin = self._is_admin(event)
+        sender = str(event.get_sender_id() or "")
+        role_id, _ = await self._role_for(event)
+        rules = self._rules()
+
+        if args.startswith("设置"):
+            if not admin:
+                yield event.plain_result("只有管理员可以调整好感度。")
+                return
+            if not target:
+                yield event.plain_result("用法：/好感度 设置 @某人 500（绝对值）或 +20 / -10（增量）")
+                return
+            # 取第一个能解析成数字的 token；带 +/- 前缀表示增量，否则视为绝对值
+            raw_value = None
+            raw_token = ""
+            for token in args[len("设置"):].split():
+                try:
+                    raw_value = float(token)
+                except ValueError:
+                    continue
+                raw_token = token
+                break
+            if raw_value is None:
+                yield event.plain_result("没有找到要设置的分数。用法：/好感度 设置 @某人 500")
+                return
+            raw = raw_value
+            mode = "delta" if raw_token.startswith(("+", "-")) else "set"
+            snapshot = await asyncio.to_thread(
+                self.store.snapshot, role_id, target, rules
+            )
+            before = float(snapshot.get("score") or 0)
+            delta = raw if mode == "delta" else raw - before
+            result = await asyncio.to_thread(
+                self.store.apply_event,
+                role_id=role_id,
+                user_id=target,
+                code="manual.adjust",
+                delta=delta,
+                source="manual",
+                rules=rules,
+                operator=sender,
+                evidence=args,
+                display_name="",
+            )
+            yield event.plain_result(
+                f"已调整 {target}：{int(before)} → {int(result.get('score') or 0)}"
+            )
+            return
+
+        if target and target != sender:
+            if not admin:
+                yield event.plain_result("普通成员只能查看自己的好感度。")
+                return
+            snapshot = await asyncio.to_thread(self.store.snapshot, role_id, target, rules)
+            yield event.plain_result(self._render_detail(snapshot, title=f"{target} 与「{role_id}」的关系"))
+            return
+
+        if not sender:
+            yield event.plain_result("拿不到你的用户 ID，无法查询。")
+            return
+        snapshot = await asyncio.to_thread(self.store.snapshot, role_id, sender, rules)
+        recent = await asyncio.to_thread(self.store.recent_events, role_id, sender, 3)
+        text = self._render_detail(snapshot, title=f"你与「{role_id}」的关系")
+        if recent:
+            labels = {
+                "chat.daily_first": "日常问候",
+                "chat.message": "聊天",
+                "chat.attention": "叫你",
+                "chat.praise": "夸奖",
+                "chat.negative": "不愉快",
+                "manual.adjust": "管理员调整",
+                "manual.reset": "重置",
+            }
+            parts = [
+                f"{labels.get(item['code'], item['code'])} {int(item['delta']):+d}"
+                for item in recent
+            ]
+            text += "\n最近：" + " · ".join(parts)
+        yield event.plain_result(text)
+
+    @filter.command("好感榜")
+    async def cmd_ranking(self, event: AstrMessageEvent):
+        """好感度排行（管理员）：/好感榜 [人数]"""
+        event.set_extra(SKIP_SCORING, True)
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员可以查看排行榜。")
+            return
+        args = self._args(event)
+        limit = 10
+        for token in args.split():
+            if token.isdigit():
+                limit = max(1, min(50, int(token)))
+                break
+        role_id, _ = await self._role_for(event)
+        rows = await asyncio.to_thread(self.store.ranking, role_id, self._rules(), limit=limit)
+        if not rows:
+            yield event.plain_result(f"「{role_id}」还没有任何好感度记录。")
+            return
+        lines = [f"「{role_id}」好感榜"]
+        for row in rows:
+            name = row["display_name"] or row["user_id"]
+            lines.append(f"{row['rank']}. {name} — {int(row['score'])} · {row['stage_label']}")
+        yield event.plain_result("\n".join(lines))
+
+    # ------------------------------------------------------------------ LLM 工具
+    @filter.llm_tool(name="query_affinity")
+    async def query_affinity(self, event: AstrMessageEvent, target: str = "me") -> str:
+        """查询当前角色与某人的好感度（只读）。
+
+        只应在用户明确询问好感度、关系如何、排名多少时调用。
+        不要凭记忆或猜测编造分数；返回 not_recorded 表示还没有记录，不是 0 分。
+
+        Args:
+            target(string): 查询对象。填 "me" 表示当前用户；管理员可填对方 QQ 号。
+        """
+        sender = str(event.get_sender_id() or "")
+        who = (target or "me").strip()
+        if who in ("me", "", "我", "自己"):
+            who = sender
+        elif who != sender and not self._is_admin(event):
+            return '{"status":"denied","message":"普通成员只能查询自己的好感度。"}'
+        role_id, persona_id = await self._role_for(event)
+        snapshot = await asyncio.to_thread(self.store.snapshot, role_id, who, self._rules())
+        snapshot.update(role_id=role_id, persona_id=persona_id, read_only=True)
+        return json.dumps(snapshot, ensure_ascii=False)
+
     async def terminate(self):
-        """插件卸载/重载时调用。骨架阶段无资源需要释放。"""
         return None

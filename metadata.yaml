@@ -1,7 +1,7 @@
 name: astrbot_plugin_moe_affinity
 display_name: 萌萌好感度
 desc: 全插件共用的好感度中枢：统一存储关系分数与事件流水，向其它插件提供版本化读写接口，并把关系与情绪注入对话。
-version: v0.1.0
+version: v0.2.0
 author: windExplorer
 repo: https://github.com/windExplorer/astrbot_plugin_moe_affinity
 category: utilities

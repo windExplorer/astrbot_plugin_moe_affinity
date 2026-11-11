@@ -1,0 +1,617 @@
+"""萌萌好感度 — SQLite 存储层。
+
+设计约束（改动前先读）：
+
+1) 分数的唯一写入口是 ``apply_event``：先落 ``events`` 流水，再更新聚合行。
+   不允许直接 UPDATE 分数，否则审计、曲线、撤销全部失效。
+2) 分数按「角色 × 用户」唯一，角色是人格的可归并映射（见 personas.py）。
+3) 闲置衰减是**惰性结算**：读写时按 ``last_settled_at`` 补齐并回写，不依赖定时任务。
+4) 写操作走 ``BEGIN IMMEDIATE``，避免并发加分互相覆盖。
+5) 本层是同步的：单条语句毫秒级，热点路径只有一个事务。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterator
+
+# 档位表：(分数占上限的比例下界, 键, 中文名)，从高到低匹配
+STAGE_TABLE: tuple[tuple[float, str, str], ...] = (
+    (0.85, "bonded", "羁绊"),
+    (0.65, "intimate", "亲密"),
+    (0.45, "close", "亲近"),
+    (0.25, "familiar", "熟悉"),
+    (0.10, "known", "眼熟"),
+    (0.00, "stranger", "陌生"),
+)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS roles (
+    role_id     TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS role_personas (
+    persona_id  TEXT PRIMARY KEY,
+    role_id     TEXT NOT NULL,
+    added_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_role_personas_role ON role_personas(role_id);
+
+CREATE TABLE IF NOT EXISTS affinities (
+    role_id             TEXT NOT NULL,
+    user_id             TEXT NOT NULL,
+    platform            TEXT NOT NULL DEFAULT '',
+    display_name        TEXT NOT NULL DEFAULT '',
+    score               REAL NOT NULL DEFAULT 0,
+    peak                REAL NOT NULL DEFAULT 0,
+    revision            INTEGER NOT NULL DEFAULT 0,
+    first_seen_at       INTEGER NOT NULL,
+    last_interaction_at INTEGER NOT NULL,
+    last_settled_at     INTEGER NOT NULL,
+    PRIMARY KEY (role_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_affinities_role_score ON affinities(role_id, score DESC);
+
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_id     TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    persona_id  TEXT NOT NULL DEFAULT '',
+    platform    TEXT NOT NULL DEFAULT '',
+    session_id  TEXT NOT NULL DEFAULT '',
+    group_id    TEXT NOT NULL DEFAULT '',
+    is_group    INTEGER NOT NULL DEFAULT 0,
+    source      TEXT NOT NULL DEFAULT 'core',
+    code        TEXT NOT NULL,
+    delta       REAL NOT NULL,
+    before      REAL NOT NULL,
+    after       REAL NOT NULL,
+    evidence    TEXT NOT NULL DEFAULT '',
+    dedupe_key  TEXT,
+    operator    TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_user ON events(role_id, user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_group ON events(role_id, group_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_events_dedupe
+    ON events(source, dedupe_key) WHERE dedupe_key IS NOT NULL;
+"""
+
+
+@dataclass(frozen=True)
+class Rules:
+    """一次结算需要的全部数值规则（由插件配置构造，避免 store 依赖配置对象）。"""
+
+    max_score: int = 1000
+    daily_gain_cap: int = 30
+    daily_loss_cap: int = 20
+    decay_enabled: bool = True
+    decay_grace_days: int = 3
+    decay_early: int = 2
+    decay_middle: int = 5
+    decay_late: int = 8
+    dedupe_window_seconds: int = 60
+
+
+def stage_of(score: float, max_score: int) -> tuple[str, str]:
+    """分数 → (档位键, 中文挡位名)。"""
+    upper = max(1, int(max_score))
+    ratio = max(0.0, min(1.0, float(score) / upper))
+    for edge, key, label in STAGE_TABLE:
+        if ratio >= edge:
+            return key, label
+    return "stranger", "陌生"
+
+
+def decay_for_days(
+    days: int,
+    *,
+    grace_days: int = 3,
+    early: int = 2,
+    middle: int = 5,
+    late: int = 8,
+) -> float:
+    """连续 ``days`` 天无有效互动应扣掉的总分（分段速率）。
+
+    3 天宽限内为 0；第 4–7 天每天 ``early``；第 8–14 天每天 ``middle``；第 15 天起每天 ``late``。
+    """
+    if days <= grace_days:
+        return 0.0
+    total = 0.0
+    day = grace_days + 1
+    while day <= days:
+        if day <= 7:
+            total += early
+        elif day <= 14:
+            total += middle
+        else:
+            total += late
+        day += 1
+    return total
+
+
+def day_start(now: int | None = None) -> int:
+    """本地时区当天 00:00 的时间戳。"""
+    moment = datetime.fromtimestamp(now if now is not None else time.time())
+    start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp())
+
+
+class AffinityStore:
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as conn:
+            conn.executescript(SCHEMA)
+
+    # ------------------------------------------------------------------ 基础
+    @contextmanager
+    def _db(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path, timeout=15, isolation_level=None)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            try:
+                conn.execute("COMMIT")
+            except sqlite3.OperationalError:
+                # executescript 会先隐式提交，此时已无活动事务
+                pass
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ 角色
+    def role_of_persona(self, persona_id: str) -> str | None:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT role_id FROM role_personas WHERE persona_id = ?",
+                (persona_id,),
+            ).fetchone()
+        return row["role_id"] if row else None
+
+    def ensure_role(self, persona_id: str, display_name: str = "") -> str:
+        """取人格对应的角色；没有就按 1:1 自动建一个。"""
+        persona_id = (persona_id or "default").strip() or "default"
+        now = int(time.time())
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT role_id FROM role_personas WHERE persona_id = ?",
+                (persona_id,),
+            ).fetchone()
+            if row:
+                return row["role_id"]
+            role_id = persona_id
+            conn.execute(
+                "INSERT OR IGNORE INTO roles(role_id, display_name, created_at, updated_at)"
+                " VALUES(?, ?, ?, ?)",
+                (role_id, display_name or persona_id, now, now),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO role_personas(persona_id, role_id, added_at)"
+                " VALUES(?, ?, ?)",
+                (persona_id, role_id, now),
+            )
+            return role_id
+
+    def list_roles(self) -> list[dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT r.role_id, r.display_name, r.created_at,"
+                " (SELECT COUNT(*) FROM role_personas p WHERE p.role_id = r.role_id) AS personas,"
+                " (SELECT COUNT(*) FROM affinities a WHERE a.role_id = r.role_id) AS users"
+                " FROM roles r ORDER BY r.created_at ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def merge_roles(self, target_role: str, source_role: str, *, strategy: str = "max") -> dict:
+        """把 source 角色并入 target。策略固定为 max（取最高），见设计说明第 2 节。"""
+        if target_role == source_role:
+            return {"status": "noop", "moved": 0, "merged": 0}
+        now = int(time.time())
+        moved = merged = 0
+        with self._db() as conn:
+            if not conn.execute("SELECT 1 FROM roles WHERE role_id = ?", (target_role,)).fetchone():
+                return {"status": "missing_target"}
+            conn.execute(
+                "UPDATE role_personas SET role_id = ? WHERE role_id = ?",
+                (target_role, source_role),
+            )
+            source_rows = conn.execute(
+                "SELECT * FROM affinities WHERE role_id = ?", (source_role,)
+            ).fetchall()
+            for src in source_rows:
+                dst = conn.execute(
+                    "SELECT * FROM affinities WHERE role_id = ? AND user_id = ?",
+                    (target_role, src["user_id"]),
+                ).fetchone()
+                if dst is None:
+                    conn.execute(
+                        "UPDATE affinities SET role_id = ? WHERE role_id = ? AND user_id = ?",
+                        (target_role, source_role, src["user_id"]),
+                    )
+                    moved += 1
+                    continue
+                before = dst["score"]
+                after = max(before, src["score"]) if strategy == "max" else before + src["score"]
+                after = max(0.0, min(float(after), 1e12))
+                conn.execute(
+                    "UPDATE affinities SET score = ?, peak = MAX(peak, ?), revision = revision + 1,"
+                    " last_interaction_at = MAX(last_interaction_at, ?),"
+                    " last_settled_at = MIN(last_settled_at, ?)"
+                    " WHERE role_id = ? AND user_id = ?",
+                    (
+                        after,
+                        after,
+                        src["last_interaction_at"],
+                        src["last_settled_at"],
+                        target_role,
+                        src["user_id"],
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO events(role_id, user_id, persona_id, platform, session_id, group_id,"
+                    " is_group, source, code, delta, before, after, evidence, dedupe_key, operator,"
+                    " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        target_role,
+                        src["user_id"],
+                        "",
+                        src["platform"],
+                        "",
+                        "",
+                        0,
+                        "merge",
+                        "manual.merge",
+                        after - before,
+                        before,
+                        after,
+                        f"from_role={source_role}",
+                        None,
+                        "",
+                        now,
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM affinities WHERE role_id = ? AND user_id = ?",
+                    (source_role, src["user_id"]),
+                )
+                merged += 1
+            conn.execute("DELETE FROM roles WHERE role_id = ?", (source_role,))
+            conn.execute("UPDATE roles SET updated_at = ? WHERE role_id = ?", (now, target_role))
+        return {"status": "ok", "moved": moved, "merged": merged}
+
+    # ------------------------------------------------------------------ 结算
+    @staticmethod
+    def _settle(score: float, last_settled_at: int, now: int, rules: Rules) -> tuple[float, float, int]:
+        """返回 (结算后分数, 衰减掉的分数, 新的结算点)。"""
+        if not rules.decay_enabled:
+            return float(score), 0.0, now
+        days = int((now - last_settled_at) // 86400)
+        if days <= 0:
+            return float(score), 0.0, now
+        lost = decay_for_days(
+            days,
+            grace_days=rules.decay_grace_days,
+            early=rules.decay_early,
+            middle=rules.decay_middle,
+            late=rules.decay_late,
+        )
+        if lost <= 0:
+            return float(score), 0.0, now
+        after = max(0.0, float(score) - lost)
+        return after, float(score) - after, now
+
+    # ------------------------------------------------------------------ 写入
+    def apply_event(
+        self,
+        *,
+        role_id: str,
+        user_id: str,
+        code: str,
+        rules: Rules,
+        delta: float = 0.0,
+        source: str = "core",
+        persona_id: str = "",
+        platform: str = "",
+        session_id: str = "",
+        group_id: str = "",
+        is_group: bool = False,
+        evidence: str = "",
+        dedupe_key: str | None = None,
+        operator: str = "",
+        display_name: str = "",
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        """记一条事件并更新聚合分数。返回快照 + 本事件的实际生效增量。"""
+        if not role_id or not user_id:
+            return {"status": "invalid", "message": "role_id / user_id 不能为空"}
+        moment = int(now if now is not None else time.time())
+        state = "ok"
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM affinities WHERE role_id = ? AND user_id = ?",
+                (role_id, user_id),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO affinities(role_id, user_id, platform, display_name, score, peak,"
+                    " revision, first_seen_at, last_interaction_at, last_settled_at)"
+                    " VALUES(?,?,?,?,0,0,0,?,?,?)",
+                    (role_id, user_id, platform, display_name, moment, moment, moment),
+                )
+                row = conn.execute(
+                    "SELECT * FROM affinities WHERE role_id = ? AND user_id = ?",
+                    (role_id, user_id),
+                ).fetchone()
+
+            before = float(row["score"])
+            settled, decayed, settled_at = self._settle(
+                before, int(row["last_settled_at"]), moment, rules
+            )
+
+            # 幂等：显式 dedupe_key 全局唯一；无 key 的 core 事件按「同码同人 N 秒内」去重
+            duplicate = False
+            if dedupe_key:
+                duplicate = (
+                    conn.execute(
+                        "SELECT 1 FROM events WHERE source = ? AND dedupe_key = ? LIMIT 1",
+                        (source, dedupe_key),
+                    ).fetchone()
+                    is not None
+                )
+            elif source == "core":
+                duplicate = (
+                    conn.execute(
+                        "SELECT 1 FROM events WHERE role_id = ? AND user_id = ? AND code = ?"
+                        " AND created_at >= ? LIMIT 1",
+                        (role_id, user_id, code, moment - max(0, rules.dedupe_window_seconds)),
+                    ).fetchone()
+                    is not None
+                )
+
+            applied = 0.0
+            # 每日上限只约束核心计分；管理员调整 / 迁移导入不受限（否则一次 -100 会被夹成 -20）
+            if not duplicate and delta and source == "core":
+                start = day_start(moment)
+                gains = conn.execute(
+                    "SELECT COALESCE(SUM(delta), 0) AS s FROM events"
+                    " WHERE role_id = ? AND user_id = ? AND delta > 0 AND created_at >= ?",
+                    (role_id, user_id, start),
+                ).fetchone()["s"]
+                losses = conn.execute(
+                    "SELECT COALESCE(SUM(delta), 0) AS s FROM events"
+                    " WHERE role_id = ? AND user_id = ? AND delta < 0 AND created_at >= ?",
+                    (role_id, user_id, start),
+                ).fetchone()["s"]
+                if delta > 0:
+                    room = max(0.0, float(rules.daily_gain_cap) - float(gains))
+                    applied = min(float(delta), room)
+                else:
+                    room = max(0.0, float(rules.daily_loss_cap) - abs(float(losses)))
+                    applied = -min(abs(float(delta)), room)
+            elif not duplicate and delta:
+                applied = float(delta)
+            elif duplicate:
+                state = "duplicate"
+
+            after = max(0.0, min(settled + applied, float(rules.max_score)))
+            applied = after - settled
+            if duplicate or applied == 0:
+                # 没有实际分差就不写流水，但衰减结算仍要落库
+                if decayed:
+                    conn.execute(
+                        "UPDATE affinities SET score = ?, last_settled_at = ?"
+                        " WHERE role_id = ? AND user_id = ?",
+                        (settled, settled_at, role_id, user_id),
+                    )
+                    before = settled
+                snapshot = self._snapshot_row(conn, role_id, user_id, rules, moment)
+                snapshot.update(status=state, applied=0.0, decayed=decayed)
+                return snapshot
+
+            conn.execute(
+                "INSERT INTO events(role_id, user_id, persona_id, platform, session_id, group_id,"
+                " is_group, source, code, delta, before, after, evidence, dedupe_key, operator,"
+                " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    role_id,
+                    user_id,
+                    persona_id,
+                    platform,
+                    session_id,
+                    group_id,
+                    1 if is_group else 0,
+                    source,
+                    code,
+                    applied,
+                    settled,
+                    after,
+                    evidence,
+                    dedupe_key,
+                    operator,
+                    moment,
+                ),
+            )
+            conn.execute(
+                "UPDATE affinities SET score = ?, peak = MAX(peak, ?), revision = revision + 1,"
+                " last_interaction_at = ?, last_settled_at = ?,"
+                " display_name = CASE WHEN ? <> '' THEN ? ELSE display_name END,"
+                " platform = CASE WHEN ? <> '' THEN ? ELSE platform END"
+                " WHERE role_id = ? AND user_id = ?",
+                (
+                    after,
+                    after,
+                    moment,
+                    settled_at,
+                    display_name,
+                    display_name,
+                    platform,
+                    platform,
+                    role_id,
+                    user_id,
+                ),
+            )
+            snapshot = self._snapshot_row(conn, role_id, user_id, rules, moment)
+        snapshot.update(status=state, applied=applied, decayed=decayed)
+        return snapshot
+
+    # ------------------------------------------------------------------ 读取
+    def _snapshot_row(
+        self, conn: sqlite3.Connection, role_id: str, user_id: str, rules: Rules, now: int
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM affinities WHERE role_id = ? AND user_id = ?",
+            (role_id, user_id),
+        ).fetchone()
+        if row is None:
+            return {"status": "not_recorded", "role_id": role_id, "user_id": user_id}
+        score = float(row["score"])
+        stage_key, stage_label = stage_of(score, rules.max_score)
+        higher = conn.execute(
+            "SELECT COUNT(*) AS c FROM affinities WHERE role_id = ? AND score > ?",
+            (role_id, score),
+        ).fetchone()["c"]
+        return {
+            "status": "ok",
+            "role_id": role_id,
+            "user_id": user_id,
+            "display_name": row["display_name"],
+            "platform": row["platform"],
+            "score": round(score, 1),
+            "peak": round(float(row["peak"]), 1),
+            "max_score": rules.max_score,
+            "stage": stage_key,
+            "stage_label": stage_label,
+            "rank": int(higher) + 1,
+            "first_seen_at": int(row["first_seen_at"]),
+            "last_interaction_at": int(row["last_interaction_at"]),
+            "revision": int(row["revision"]),
+            "observed_at": now,
+        }
+
+    def snapshot(self, role_id: str, user_id: str, rules: Rules, now: int | None = None) -> dict:
+        """读快照；顺带结算闲置衰减（惰性）。"""
+        moment = int(now if now is not None else time.time())
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT score, last_settled_at FROM affinities WHERE role_id = ? AND user_id = ?",
+                (role_id, user_id),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_recorded", "role_id": role_id, "user_id": user_id}
+            settled, decayed, settled_at = self._settle(
+                float(row["score"]), int(row["last_settled_at"]), moment, rules
+            )
+            if decayed:
+                conn.execute(
+                    "UPDATE affinities SET score = ?, last_settled_at = ?"
+                    " WHERE role_id = ? AND user_id = ?",
+                    (settled, settled_at, role_id, user_id),
+                )
+            return self._snapshot_row(conn, role_id, user_id, rules, moment)
+
+    def ranking(self, role_id: str, rules: Rules, *, limit: int = 10, offset: int = 0,
+                now: int | None = None) -> list[dict]:
+        """角色内排行；先把该角色所有人结算一遍，避免长期不活跃者的旧分数霸榜。"""
+        moment = int(now if now is not None else time.time())
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM affinities WHERE role_id = ?", (role_id,)
+            ).fetchall()
+            for row in rows:
+                settled, decayed, settled_at = self._settle(
+                    float(row["score"]), int(row["last_settled_at"]), moment, rules
+                )
+                if decayed:
+                    conn.execute(
+                        "UPDATE affinities SET score = ?, last_settled_at = ?"
+                        " WHERE role_id = ? AND user_id = ?",
+                        (settled, settled_at, role_id, row["user_id"]),
+                    )
+            rows = conn.execute(
+                "SELECT user_id, display_name, score, last_interaction_at FROM affinities"
+                " WHERE role_id = ? ORDER BY score DESC, last_interaction_at DESC LIMIT ? OFFSET ?",
+                (role_id, max(1, limit), max(0, offset)),
+            ).fetchall()
+        result = []
+        for index, row in enumerate(rows, start=1 + max(0, offset)):
+            stage_key, stage_label = stage_of(float(row["score"]), rules.max_score)
+            result.append(
+                {
+                    "rank": index,
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"],
+                    "score": round(float(row["score"]), 1),
+                    "stage": stage_key,
+                    "stage_label": stage_label,
+                    "last_interaction_at": int(row["last_interaction_at"]),
+                }
+            )
+        return result
+
+    def stats(self, role_id: str) -> dict[str, Any]:
+        with self._db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS c FROM affinities WHERE role_id = ?", (role_id,)
+            ).fetchone()["c"]
+            avg = conn.execute(
+                "SELECT COALESCE(AVG(score), 0) AS a FROM affinities WHERE role_id = ?", (role_id,)
+            ).fetchone()["a"]
+            events = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE role_id = ?", (role_id,)
+            ).fetchone()["c"]
+        return {"users": int(total), "avg_score": round(float(avg), 1), "events": int(events)}
+
+    def recent_events(self, role_id: str, user_id: str, limit: int = 5) -> list[dict]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT code, delta, before, after, source, created_at FROM events"
+                " WHERE role_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?",
+                (role_id, user_id, max(1, limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reset_user(
+        self, role_id: str, user_id: str, rules: Rules, *, operator: str = "", reason: str = ""
+    ) -> dict:
+        """清空某人的分数（保留流水，写一条 manual.reset 事件）。"""
+        current = self.snapshot(role_id, user_id, rules)
+        score = float(current.get("score") or 0)
+        if current.get("status") != "ok":
+            return {"status": "not_recorded"}
+        return self.apply_event(
+            role_id=role_id,
+            user_id=user_id,
+            code="manual.reset",
+            delta=-score,
+            source="manual",
+            rules=rules,
+            operator=operator,
+            evidence=reason,
+            display_name=str(current.get("display_name") or ""),
+        )
+
+    def ping(self) -> bool:
+        try:
+            with self._db() as conn:
+                conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:
+            return False
