@@ -161,6 +161,26 @@ async def h_ping(plugin) -> dict:
     )
 
 
+async def _bound_personas(plugin) -> dict[str, int]:
+    """统计「有人格绑定的会话数」：人格 → 会话数。
+
+    AstrBot 的会话（conversation）各自绑定 persona_id，这是「这个角色正在被用」的
+    最直接证据——比「有没有分数记录」准，因为刚导入数据时还没人聊过。
+    """
+    counts: dict[str, int] = {}
+    try:
+        manager = plugin.context.conversation_manager
+        conversations = await manager.get_conversations()
+    except Exception as exc:
+        logger.debug(f"[moe_affinity] 读取会话绑定失败（按无绑定处理）: {exc}")
+        return counts
+    for conversation in conversations or []:
+        persona_id = str(getattr(conversation, "persona_id", "") or "").strip()
+        if persona_id:
+            counts[persona_id] = counts.get(persona_id, 0) + 1
+    return counts
+
+
 async def h_roles(plugin) -> dict:
     roles = plugin.store.list_roles()
     if not roles:
@@ -168,9 +188,19 @@ async def h_roles(plugin) -> dict:
         # 否则控制台顶部「暂无角色」，迁移页也选不到导入目标。
         plugin.store.ensure_role("default", "默认人格")
         roles = plugin.store.list_roles()
+    bound = await _bound_personas(plugin)
+    mapping = plugin.store.role_personas()
+    role_sessions: dict[str, int] = {}
+    for item in mapping:
+        hits = bound.get(item["persona_id"], 0)
+        if hits:
+            role_sessions[item["role_id"]] = role_sessions.get(item["role_id"], 0) + hits
     for role in roles:
-        # 使用中 = 已经有分数记录；启动时按人格预建的空壳角色不算
-        role["in_use"] = int(role.get("users") or 0) > 0
+        sessions = role_sessions.get(role["role_id"], 0)
+        users = int(role.get("users") or 0)
+        role["bound_sessions"] = sessions
+        # 使用中 = 有会话绑定，或者已经有分数记录（人格被删/会话清空但数据还在）
+        role["in_use"] = sessions > 0 or users > 0
     return ok({"items": roles, "total": len(roles)})
 
 
@@ -398,18 +428,21 @@ async def h_roles_personas(plugin) -> dict:
     except Exception:
         pass
     roles = {item["role_id"]: item for item in plugin.store.list_roles()}
+    bound = await _bound_personas(plugin)
     items = []
     for persona_id, role_id in mapping.items():
         role = roles.get(role_id) or {}
         users = int(role.get("users") or 0)
+        sessions = int(bound.get(persona_id, 0))
         items.append(
             {
                 "persona_id": persona_id,
                 "role_id": role_id,
                 "role_name": role.get("display_name") or role_id,
                 "persona_exists": persona_id in alive,
-                "in_use": users > 0,
+                "in_use": sessions > 0 or users > 0,
                 "users": users,
+                "bound_sessions": sessions,
                 "last_active_at": int(role.get("last_active_at") or 0),
             }
         )

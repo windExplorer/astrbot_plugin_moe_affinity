@@ -36,6 +36,12 @@ const roleOptions = computed(() => {
   }));
 });
 
+const hiddenRoles = computed(() => {
+  const inUse = app.roles.filter((role) => role.in_use);
+  if (!inUse.length) return 0;
+  return app.roles.length - inUse.length;
+});
+
 function onRole(value: string) {
   setRole(value);
   router.replace({ query: { ...route.query, role: value } });
@@ -86,6 +92,10 @@ async function refresh() {
               :consistent-menu-width="false"
               @update:value="onRole"
             />
+          </div>
+          <div v-if="hiddenRoles" class="faint" style="font-size: 12px">
+            已隐藏 {{ hiddenRoles }} 个未使用角色 ·
+            <router-link to="/roles" style="color: var(--accent)">查看全部</router-link>
           </div>
           <n-button size="small" secondary block @click="refresh">刷新数据</n-button>
           <div class="faint" style="font-size: 12px">

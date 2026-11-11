@@ -115,8 +115,8 @@ onMounted(load);
     </div>
 
     <p class="faint" style="margin: 0 0 12px">
-      启动时会按 AstrBot 里的人格各建一个角色，「使用中」指已经有分数记录；
-      还没聊过的人格不算，勾掉上面的开关可以看到全部。
+      启动时会按 AstrBot 里的人格各建一个角色。「使用中」= 有会话绑定到该人格，或已有分数记录；
+      两者都没有的空壳不算，关掉上面的开关可以看到全部。
     </p>
 
     <table>
@@ -124,6 +124,7 @@ onMounted(load);
         <tr>
           <th>角色</th>
           <th style="width: 90px">人格数</th>
+          <th style="width: 80px">会话</th>
           <th style="width: 80px">用户数</th>
           <th style="width: 110px">最近活跃</th>
           <th style="width: 210px"></th>
@@ -146,6 +147,7 @@ onMounted(load);
             </div>
           </td>
           <td class="mono">{{ personaCount(role.role_id) }}</td>
+          <td class="mono">{{ role.bound_sessions }}</td>
           <td class="mono">{{ role.users }}</td>
           <td class="faint">{{ role.last_active_at ? timeAgo(role.last_active_at) : "—" }}</td>
           <td>
@@ -196,7 +198,7 @@ onMounted(load);
           </td>
           <td>
             <n-tag v-if="item.in_use" size="small" round :bordered="false">
-              {{ item.users }} 人 · {{ timeAgo(item.last_active_at) }}
+              {{ item.bound_sessions }} 会话 · {{ item.users }} 人
             </n-tag>
             <n-tag v-else size="small" round :bordered="false" type="warning">未使用</n-tag>
           </td>

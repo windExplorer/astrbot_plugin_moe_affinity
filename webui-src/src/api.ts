@@ -116,6 +116,7 @@ export interface RoleRow {
   users: number;
   last_active_at: number;
   in_use: boolean;
+  bound_sessions: number;
 }
 
 export interface StageBucket {
@@ -272,6 +273,7 @@ export interface RolePersonaRow {
   persona_exists: boolean;
   in_use: boolean;
   users: number;
+  bound_sessions: number;
   last_active_at: number;
 }
 
