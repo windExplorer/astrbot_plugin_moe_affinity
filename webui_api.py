@@ -617,29 +617,145 @@ async def h_migrate_apply(plugin) -> dict:
     )
 
 
-async def h_sync_groups(plugin) -> dict:
-    """从 OneBot 拉群列表补群名（aiocqhttp 专属，失败不影响控制台）。"""
-    names: dict[str, str] = {}
-    errors: list[str] = []
+def _aiocqhttp_platforms(plugin) -> list:
     try:
         insts = plugin.context.platform_manager.platform_insts
     except Exception:
-        insts = []
+        return []
+    out = []
     for inst in insts or []:
         try:
-            if getattr(inst.meta(), "name", "") != "aiocqhttp":
-                continue
-            bot = inst.get_client()
-            groups = await bot.call_action("get_group_list")
-        except Exception as exc:
-            errors.append(str(exc))
+            if getattr(inst.meta(), "name", "") == "aiocqhttp":
+                out.append(inst)
+        except Exception:
             continue
-        for group in groups or []:
-            gid = str(group.get("group_id") or "")
-            if gid:
-                names[gid] = str(group.get("group_name") or "")
-    count = plugin.store.upsert_groups(names)
-    return ok({"ok": bool(names), "count": count, "errors": errors})
+    return out
+
+
+async def h_sync(plugin) -> dict:
+    """从 OneBot 拉好友/群列表（可选群成员）补昵称与群名。"""
+    body = await _payload()
+    with_members = bool(body.get("members"))
+    platforms = _aiocqhttp_platforms(plugin)
+    if not platforms:
+        return err("未找到 aiocqhttp 平台实例（请先启用一个 OneBot 适配器）")
+
+    users: dict[str, str] = {}
+    groups: dict[str, str] = {}
+    errors: list[str] = []
+    for inst in platforms:
+        try:
+            bot = inst.get_client()
+        except Exception as exc:
+            errors.append(f"获取协议端客户端失败: {exc}")
+            continue
+        try:
+            friends = await bot.call_action("get_friend_list")
+            for friend in friends or []:
+                uid = str(friend.get("user_id") or "")
+                name = str(friend.get("remark") or friend.get("nickname") or "").strip()
+                if uid and name:
+                    users[uid] = name
+        except Exception as exc:
+            errors.append(f"好友列表拉取失败: {exc}")
+        try:
+            group_list = await bot.call_action("get_group_list")
+            for group in group_list or []:
+                gid = str(group.get("group_id") or "")
+                if gid:
+                    groups[gid] = str(group.get("group_name") or "")
+        except Exception as exc:
+            errors.append(f"群列表拉取失败: {exc}")
+
+        if with_members:
+            for gid in list(groups):
+                try:
+                    members = await bot.call_action("get_group_member_list", group_id=int(gid))
+                except Exception:
+                    continue
+                for member in members or []:
+                    uid = str(member.get("user_id") or "")
+                    name = str(member.get("card") or member.get("nickname") or "").strip()
+                    # 群名片优先，但好友备注已经有名字时不覆盖
+                    if uid and name and uid not in users:
+                        users[uid] = name
+
+    renamed = plugin.store.upsert_user_names(users)
+    group_count = plugin.store.upsert_groups(groups)
+    return ok(
+        {
+            "ok": bool(users or groups),
+            "users": len(users),
+            "groups": group_count,
+            "renamed": renamed,
+            "members": with_members,
+            "errors": errors,
+        }
+    )
+
+
+AVATAR_URLS = {
+    "user": "https://q1.qlogo.cn/g?b=qq&nk={id}&s=100",
+    "group": "https://p.qlogo.cn/gh/{id}/{id}/100",
+}
+
+
+async def _fetch_avatars(keys: list[str]) -> dict[str, str]:
+    """按 key 抓头像并转成 data URI（前端 <img> 直接用，不依赖外部域名可达）。"""
+    try:
+        import aiohttp
+    except Exception as exc:  # pragma: no cover - 运行期依赖
+        logger.warning(f"[moe_affinity] aiohttp 不可用，头像功能关闭: {exc}")
+        return {}
+    import base64
+
+    out: dict[str, str] = {}
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for key in keys:
+                kind, _, ident = key.partition(":")
+                template = AVATAR_URLS.get(kind)
+                if not template or not ident:
+                    continue
+                try:
+                    async with session.get(template.format(id=ident)) as resp:
+                        if resp.status != 200:
+                            continue
+                        raw = await resp.read()
+                        if not raw:
+                            continue
+                        ctype = resp.headers.get("Content-Type") or "image/jpeg"
+                        out[key] = f"data:{ctype};base64,{base64.b64encode(raw).decode('ascii')}"
+                except Exception:
+                    continue
+    except Exception as exc:
+        logger.debug(f"[moe_affinity] 头像抓取失败: {exc}")
+    return out
+
+
+async def h_avatars(plugin) -> dict:
+    kind = _q("type", "user")
+    if kind not in AVATAR_URLS:
+        kind = "user"
+    ids = [item.strip() for item in _q("ids").split(",") if item.strip()][:100]
+    if not ids:
+        return ok({"items": {}, "got": 0, "total": 0})
+    keys = [f"{kind}:{ident}" for ident in ids]
+    cached = {} if _qb("force") else plugin.store.get_avatars(keys)
+    missing = [key for key in keys if key not in cached]
+    if missing:
+        fetched = await _fetch_avatars(missing)
+        if fetched:
+            plugin.store.put_avatars(fetched)
+            cached.update(fetched)
+    return ok(
+        {
+            "items": {key.split(":", 1)[1]: value for key, value in cached.items()},
+            "got": len(cached),
+            "total": len(keys),
+        }
+    )
 
 
 # ---------------------------------------------------------------------- 注册
@@ -671,7 +787,8 @@ def register_apis(plugin) -> None:
         ("/user", h_user, ["GET"]),
         ("/groups", h_groups, ["GET"]),
         ("/group", h_group, ["GET"]),
-        ("/groups/sync", h_sync_groups, ["POST"]),
+        ("/sync", h_sync, ["POST"]),
+        ("/avatars", h_avatars, ["GET"]),
         ("/rank", h_rank, ["GET"]),
         ("/audit", h_audit, ["GET"]),
         ("/config", h_config, ["GET"]),

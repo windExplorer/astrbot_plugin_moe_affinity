@@ -65,13 +65,13 @@ watch(() => [app.role, limit.value], load);
         >
           {{ row.rank }}
         </span>
-        <span class="avatar">{{ initials(row.display_name, row.user_id) }}</span>
+        <Avatar :id="row.user_id" :name="row.display_name || row.user_id" />
         <div style="min-width: 120px">
           <div class="n">{{ row.display_name || row.user_id }}</div>
           <div class="i">{{ row.user_id }}</div>
         </div>
         <div class="bar" style="flex: 1; min-width: 60px">
-          <i :style="{ width: Math.min(100, row.progress * 100) + '%' }"></i>
+          <i :style="{ width: Math.min(100, row.overall_progress * 100) + '%' }"></i>
         </div>
         <span class="pill">{{ row.stage_label }}</span>
         <span class="mono" style="width: 56px; text-align: right">{{ row.score }}</span>

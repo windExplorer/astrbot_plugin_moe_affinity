@@ -98,7 +98,7 @@ const trend = computed(() => {
         >
           <td>
             <div class="who">
-              <span class="avatar">{{ initials(row.display_name, row.user_id) }}</span>
+              <Avatar :id="row.user_id" :name="row.display_name || row.user_id" />
               <div>
                 <div class="n">{{ row.display_name || row.user_id }}</div>
                 <div class="i">{{ row.user_id }}</div>

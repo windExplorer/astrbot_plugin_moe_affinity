@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { apiUsers, type UserRow } from "../api";
+import { apiSync, apiUsers, type UserRow } from "../api";
 import { app, notify } from "../state";
 import { initials, timeAgo } from "../lib/format";
 import ScoreDialog from "../components/ScoreDialog.vue";
@@ -75,6 +75,21 @@ watch(keyword, () => {
 onMounted(load);
 watch(() => [app.role, route.query.q, route.query.stage, route.query.sort, route.query.page], load);
 
+const syncing = ref(false);
+
+async function syncNames() {
+  syncing.value = true;
+  try {
+    const res = await apiSync(false);
+    notify(res.ok ? `已同步 ${res.users} 个昵称（更新 ${res.renamed} 条）` : res.errors?.[0] || "同步失败", !res.ok);
+    await load();
+  } catch (e: any) {
+    notify(e?.message || String(e), true);
+  } finally {
+    syncing.value = false;
+  }
+}
+
 function openUser(row: UserRow) {
   router.push({ path: `/users/${row.user_id}`, query: { ...route.query } });
 }
@@ -97,6 +112,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
         placeholder="搜索昵称或 QQ 号"
       />
       <n-button secondary @click="submitSearch">搜索</n-button>
+      <n-button quaternary :loading="syncing" @click="syncNames">同步昵称</n-button>
       <div class="spacer"></div>
       <n-select
         style="width: 150px"
@@ -139,7 +155,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           <td class="faint mono">{{ row.rank }}</td>
           <td>
             <div class="who">
-              <span class="avatar">{{ initials(row.display_name, row.user_id) }}</span>
+              <Avatar :id="row.user_id" :name="row.display_name || row.user_id" />
               <div style="min-width: 0">
                 <div class="n">{{ row.display_name || row.user_id }}</div>
                 <div class="i">{{ row.user_id }}</div>
@@ -149,7 +165,7 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
           <td>
             <div class="row">
               <div class="bar" style="width: 110px">
-                <i :style="{ width: Math.min(100, row.progress * 100) + '%' }"></i>
+                <i :style="{ width: Math.min(100, row.overall_progress * 100) + '%' }"></i>
               </div>
               <span class="mono">{{ row.score }}</span>
             </div>

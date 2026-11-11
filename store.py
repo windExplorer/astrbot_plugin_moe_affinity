@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS groups (
     updated_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS avatar_cache (
+    cache_key   TEXT PRIMARY KEY,
+    data_uri    TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS moods (
     role_id    TEXT PRIMARY KEY,
     joy        REAL NOT NULL DEFAULT 5,
@@ -131,7 +137,13 @@ def stage_of(score: float) -> tuple[str, str]:
 
 
 def stage_info(score: float) -> dict[str, Any]:
-    """档位 + 当前段内进度，供控制台的分数条使用。"""
+    """档位 + 两套进度。
+
+    ``progress`` 是**当前档位内**的进度（到下一档的百分比）；
+    ``overall_progress`` 是**到顶档（羁绊 2000）**的整体进度，跨档单调递增。
+
+    控制台的分数条用后者：用前者会出现「刚升档，进度条突然回退到 0」的错觉。
+    """
     value = max(0.0, float(score))
     key, label = stage_of(value)
     floors = [floor for floor, _k, _l in STAGE_TABLE]
@@ -152,6 +164,7 @@ def stage_info(score: float) -> dict[str, Any]:
         "next_stage_at": ceiling,
         "next_stage_label": next_label,
         "progress": round(progress, 4),
+        "overall_progress": round(min(1.0, value / max(1, TOP_STAGE_AT)), 4),
     }
 
 
@@ -553,6 +566,7 @@ class AffinityStore:
             "next_stage_at": info["next_stage_at"],
             "next_stage_label": info["next_stage_label"],
             "progress": info["progress"],
+            "overall_progress": info["overall_progress"],
             "rank": int(higher) + 1,
             "first_seen_at": int(row["first_seen_at"]),
             "last_interaction_at": int(row["last_interaction_at"]),
@@ -616,6 +630,7 @@ class AffinityStore:
                     "stage": info["stage"],
                     "stage_label": info["stage_label"],
                     "progress": info["progress"],
+                    "overall_progress": info["overall_progress"],
                     "next_stage_at": info["next_stage_at"],
                     "next_stage_label": info["next_stage_label"],
                     "last_interaction_at": int(row["last_interaction_at"]),
@@ -741,6 +756,55 @@ class AffinityStore:
             out.add(rest)
         return out
 
+    def upsert_user_names(self, mapping: dict[str, str]) -> int:
+        """用协议端同步来的昵称/群名片补齐历史用户的名字。
+
+        只更新**已有分数记录**的用户（不凭空造人）；同一 user_id 在所有角色下一起更新。
+        """
+        if not mapping:
+            return 0
+        updated = 0
+        with self._db() as conn:
+            for user_id, name in mapping.items():
+                uid = str(user_id or "").strip()
+                text = str(name or "").strip()
+                if not uid or not text:
+                    continue
+                cursor = conn.execute(
+                    "UPDATE affinities SET display_name = ?"
+                    " WHERE user_id = ? AND display_name <> ?",
+                    (text, uid, text),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
+
+    def get_avatars(self, keys: list[str]) -> dict[str, str]:
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _ in keys)
+        with self._db() as conn:
+            rows = conn.execute(
+                f"SELECT cache_key, data_uri FROM avatar_cache WHERE cache_key IN ({placeholders})",
+                list(keys),
+            ).fetchall()
+        return {row["cache_key"]: row["data_uri"] for row in rows}
+
+    def put_avatars(self, mapping: dict[str, str], now: int | None = None) -> int:
+        if not mapping:
+            return 0
+        moment = int(now if now is not None else time.time())
+        with self._db() as conn:
+            for key, data_uri in mapping.items():
+                if not key or not data_uri:
+                    continue
+                conn.execute(
+                    "INSERT INTO avatar_cache(cache_key, data_uri, updated_at) VALUES(?,?,?)"
+                    " ON CONFLICT(cache_key) DO UPDATE SET data_uri = excluded.data_uri,"
+                    " updated_at = excluded.updated_at",
+                    (key, data_uri, moment),
+                )
+        return len(mapping)
+
     def _settle_role(self, conn: sqlite3.Connection, role_id: str, rules: Rules, now: int) -> None:
         rows = conn.execute(
             "SELECT user_id, score, last_settled_at FROM affinities WHERE role_id = ?", (role_id,)
@@ -809,6 +873,7 @@ class AffinityStore:
                     "stage": info["stage"],
                     "stage_label": info["stage_label"],
                     "progress": info["progress"],
+                    "overall_progress": info["overall_progress"],
                     "next_stage_at": info["next_stage_at"],
                     "next_stage_label": info["next_stage_label"],
                     "first_seen_at": int(row["first_seen_at"]),
@@ -1013,6 +1078,7 @@ class AffinityStore:
                     "stage": info["stage"],
                     "stage_label": info["stage_label"],
                     "progress": info["progress"],
+                    "overall_progress": info["overall_progress"],
                     "next_stage_at": info["next_stage_at"],
                     "next_stage_label": info["next_stage_label"],
                     "last_interaction_at": int(row["last_interaction_at"] or 0),

@@ -23,6 +23,7 @@ import {
   NTooltip,
 } from "naive-ui";
 import App from "./App.vue";
+import Avatar from "./components/Avatar.vue";
 import "./styles.css";
 import { bootstrap } from "./state";
 
@@ -67,6 +68,7 @@ const application = createApp(App).use(router);
 
 // 全局注册用到的 Naive UI 组件（模板里写 kebab-case 即可，Vue 会自动匹配 PascalCase）
 const components = {
+  Avatar,
   NAlert,
   NButton,
   NCard,

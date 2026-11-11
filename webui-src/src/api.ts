@@ -162,6 +162,7 @@ export interface UserRow {
   stage: string;
   stage_label: string;
   progress: number;
+  overall_progress: number;
   next_stage_at: number | null;
   next_stage_label: string;
   first_seen_at: number;
@@ -234,6 +235,7 @@ export interface RankRow {
   stage: string;
   stage_label: string;
   progress: number;
+  overall_progress: number;
   next_stage_at: number | null;
   next_stage_label: string;
   last_interaction_at: number;
@@ -395,7 +397,21 @@ export const apiGroups = (role: string) =>
   apiGet<{ items: GroupRow[]; total: number }>(`/groups?role=${encodeURIComponent(role)}`);
 export const apiGroup = (role: string, id: string) =>
   apiGet<GroupDetail>(`/group?role=${encodeURIComponent(role)}&id=${encodeURIComponent(id)}`);
-export const apiSyncGroups = () => apiPost<{ ok: boolean; count: number; errors: string[] }>("/groups/sync", {}, 60000);
+export const apiSync = (members = false) =>
+  apiPost<{ ok: boolean; users: number; groups: number; renamed: number; members: boolean; errors: string[] }>(
+    "/sync",
+    { members },
+    180000,
+  );
+
+export const apiAvatars = (kind: "user" | "group", ids: string[], force = false) => {
+  const p = new URLSearchParams({ type: kind, ids: ids.join(",") });
+  if (force) p.set("force", "1");
+  return apiGet<{ items: Record<string, string>; got: number; total: number }>(
+    `/avatars?${p.toString()}`,
+    60000,
+  );
+};
 export const apiRank = (role: string, limit = 20) =>
   apiGet<{ items: RankRow[] }>(`/rank?role=${encodeURIComponent(role)}&limit=${limit}`);
 export const apiAudit = (page = 1, size = 50) => apiGet<{ total: number; rows: AuditRow[] }>(`/audit?page=${page}&size=${size}`);

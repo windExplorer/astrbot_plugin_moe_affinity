@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { apiGroups, apiSyncGroups, type GroupRow } from "../api";
+import { apiGroups, apiSync, type GroupRow } from "../api";
 import { app, notify } from "../state";
 import { signed, timeAgo } from "../lib/format";
 
@@ -25,8 +25,13 @@ async function load() {
 async function sync() {
   syncing.value = true;
   try {
-    const res = await apiSyncGroups();
-    notify(res.ok ? `已同步 ${res.count} 个群名` : res.errors?.[0] || "同步失败", !res.ok);
+    const res = await apiSync(true);
+    notify(
+      res.ok
+        ? `已同步 ${res.groups} 个群、「${res.renamed}」条昵称（含群成员）`
+        : res.errors?.[0] || "同步失败",
+      !res.ok,
+    );
     await load();
   } catch (e: any) {
     notify(e?.message || String(e), true);
@@ -45,7 +50,7 @@ watch(() => app.role, load);
       <div class="card-t">群聊贡献</div>
       <div class="spacer"></div>
       <span class="faint">分数是全局一份，这里统计每个群贡献了多少</span>
-      <n-button size="small" quaternary :loading="syncing" @click="sync">同步群名</n-button>
+      <n-button size="small" quaternary :loading="syncing" @click="sync">同步群名与成员</n-button>
     </div>
 
     <table>
@@ -66,8 +71,13 @@ watch(() => app.role, load);
           @click="router.push(`/groups/${row.group_id}`)"
         >
           <td>
-            <div style="font-weight: 550">{{ row.group_name || "未命名群" }}</div>
-            <div class="faint">{{ row.group_id }}</div>
+            <div class="who">
+              <Avatar :id="row.group_id" kind="group" :name="row.group_name || row.group_id" />
+              <div style="min-width: 0">
+                <div class="n" style="font-weight: 550">{{ row.group_name || "未命名群" }}</div>
+                <div class="i">{{ row.group_id }}</div>
+              </div>
+            </div>
           </td>
           <td class="mono">{{ row.users }}</td>
           <td class="mono" :class="row.delta >= 0 ? 'pos' : 'neg'">{{ signed(row.delta) }}</td>

@@ -69,6 +69,11 @@ def test_stage():
     check("段内进度 650/600-1000", info["stage"] == "close" and 0 < info["progress"] < 1, str(info))
     check("顶档进度恒为 1", store.stage_info(5000)["progress"] == 1.0)
     check("下一档阈值", store.stage_info(650)["next_stage_at"] == 1000, str(store.stage_info(650)))
+    # 分数条用 overall_progress：跨档必须单调，否则「刚升档进度条回退」
+    check("整体进度单调递增",
+          store.stage_info(600)["overall_progress"] > store.stage_info(599)["overall_progress"])
+    check("整体进度封顶 1", store.stage_info(99999)["overall_progress"] == 1.0)
+    check("整体进度按顶档 2000 折算", store.stage_info(1000)["overall_progress"] == 0.5)
 
 
 # ---------------------------------------------------------------- 衰减
@@ -323,6 +328,31 @@ def test_rules_info():
     check("宽限期超 7 天不出空区间", all("11–7" not in text for text in ranges), str(ranges))
 
 
+def test_identity_cache():
+    print("[identity]")
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_identity_"))
+    try:
+        db = store.AffinityStore(tmp / "i.db")
+        rules = store.Rules()
+        role = db.ensure_role("p1")
+        db.apply_event(role_id=role, user_id="10086", code="chat.message", delta=5, rules=rules)
+
+        before = db.snapshot(role, "10086", rules)
+        check("初始无昵称", before["display_name"] == "", str(before))
+
+        updated = db.upsert_user_names({"10086": "小明", "10010": "不存在的人"})
+        check("只更新已有记录", updated == 1, str(updated))
+        after = db.snapshot(role, "10086", rules)
+        check("昵称写入", after["display_name"] == "小明", str(after))
+
+        db.put_avatars({"user:10086": "data:image/jpeg;base64,AAA"})
+        got = db.get_avatars(["user:10086", "user:999"])
+        check("头像缓存命中", got.get("user:10086", "").startswith("data:image"), str(got))
+        check("未缓存的不返回", "user:999" not in got)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_migration_role_scope():
     print("[migration/role]")
     import migrate_self_learning as mig
@@ -441,6 +471,7 @@ def main():
     test_console_queries()
     test_mood()
     test_rules_info()
+    test_identity_cache()
     test_migration_role_scope()
     test_migration()
     print()

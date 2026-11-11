@@ -31,7 +31,7 @@ onMounted(load);
 watch(() => [app.role, userId.value], load);
 
 const snap = computed(() => detail.value?.snapshot as any);
-const ratio = computed(() => Math.min(100, (snap.value?.progress || 0) * 100));
+const ratio = computed(() => Math.min(100, (snap.value?.overall_progress || 0) * 100));
 const knownDays = computed(() =>
   snap.value ? Math.max(0, Math.floor((Date.now() / 1000 - snap.value.first_seen_at) / 86400)) : 0,
 );
@@ -100,9 +100,7 @@ function saved() {
   <template v-else-if="snap">
     <div class="card">
       <div class="row" style="align-items: flex-start">
-        <span class="avatar" style="width: 44px; height: 44px; border-radius: 13px; font-size: 16px">
-          {{ initials(snap.display_name, snap.user_id) }}
-        </span>
+        <Avatar :id="snap.user_id" :name="snap.display_name || snap.user_id" :size="44" />
         <div style="flex: 1; min-width: 0">
           <div style="font-size: 18px; font-weight: 650">{{ snap.display_name || snap.user_id }}</div>
           <div class="faint">{{ snap.user_id }}<span v-if="snap.platform"> · {{ snap.platform }}</span></div>
