@@ -4,8 +4,9 @@
 
 - 每日抽签是「持续来见面」的互动行为，按签到同款模式**并入主分数**：
   写到该用户**有记录的每个角色**各一份（用户在签到同步时已明确选择此展开方式）；
-- ``delta = 对方当日抽签星尘实得 × 系数``（默认 0.2，即每天抽签约 +2 分；
-  吉凶/连签/双倍日加成都在同一笔 ``reason='draw'`` 流水里，整笔按实得折算，evidence 留档）；
+- ``delta = 对方当日抽签星尘实得 × 系数``（默认 0.1，即每天抽签约 +1~2 分、
+  周日双倍最多 +5；吉凶/连签/双倍日加成都在同一笔 ``reason='draw'`` 流水里，
+  整笔按实得折算，evidence 留档）；
 - 只同步正项 ``reason='draw'``：买道具 / 玩法消费不回扣好感度（花钱 ≠ 变冷淡），
   管理员手动发放（无 ref_date）也不转（那是运营操作，不是互动情分）；
 - ``dedupe_key = stardust:{role}:{user}:{date}:draw``：抽签一天最多一笔，天然幂等；
@@ -231,19 +232,19 @@ def _sync_rows(store, rows: list[dict[str, Any]], *, scale: float, rules) -> dic
     return {"records": len(rows), "written": written}
 
 
-def sync_recent(store, db_path: Path, *, scale: float = 0.2, rules=None, days: int = 2) -> dict[str, int]:
+def sync_recent(store, db_path: Path, *, scale: float = 0.1, rules=None, days: int = 2) -> dict[str, int]:
     """增量同步最近 N 天（后台循环用，幂等）。"""
     rows = read_rewards(db_path, since_date=since_key(days))
     return _sync_rows(store, rows, scale=scale, rules=rules)
 
 
-def sync_full(store, db_path: Path, *, scale: float = 0.2, rules=None) -> dict[str, int]:
+def sync_full(store, db_path: Path, *, scale: float = 0.1, rules=None) -> dict[str, int]:
     """全量导入历史（幂等：已导入过的被唯一索引吞掉）。"""
     rows = read_rewards(db_path)
     return _sync_rows(store, rows, scale=scale, rules=rules)
 
 
-def ensure_user_fresh(store, db_path: Path | None, user_id: str, *, scale: float = 0.2, rules=None) -> dict[str, Any]:
+def ensure_user_fresh(store, db_path: Path | None, user_id: str, *, scale: float = 0.1, rules=None) -> dict[str, Any]:
     """指令触发的按需同步：只看这一个用户，带两层防重读。
 
     1) 该用户今天的星尘事件已经在库里 → 直接返回 ``fresh``，完全不碰对方库；

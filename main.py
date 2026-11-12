@@ -399,7 +399,8 @@ class MoeAffinityPlugin(Star):
         cfg = self._section("stardust_sync")
         return {
             "enabled": bool(cfg.get("enabled", True)),
-            "scale": float(cfg.get("scale", 0.2) or 0.2),
+            # v0.13.1：0.2 -> 0.1（用户反馈涨太快——抽签每天 +1~2 分，周日双倍最多 +5）
+            "scale": float(cfg.get("scale", 0.1) or 0.1),
             "inject": bool(cfg.get("inject", True)),
             "db_path": str(cfg.get("db_path") or "").strip(),
         }
