@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import hashlib
 import importlib
 import json
 import re
@@ -18,6 +19,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 from . import (
@@ -31,6 +33,11 @@ from . import (
     store,
     webui_api,
 )
+
+try:  # 图卡（纯 Pillow）；缺失/失败时回落纯文本
+    from . import card
+except Exception:  # pragma: no cover
+    card = None
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 API_VERSION = "affinity.v1"
@@ -58,7 +65,7 @@ def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
     for module in (
         store, scoring, mood, personas, rules_info, migrate_self_learning,
-        checkin_sync, stardust_sync, webui_api,
+        checkin_sync, stardust_sync, webui_api, card,
     ):
         try:
             importlib.reload(module)
@@ -246,6 +253,8 @@ class MoeAffinityPlugin(Star):
         self.store = store.AffinityStore(self.data_dir / "affinity.db")
         self.api = AffinityApi(self)
         self.plugin_version = PLUGIN_VERSION
+        # 榜单/档案卡头像缓存：uid -> (monotonic_ts, bytes|None)，失败的也记 None 防重试打接口
+        self._avatar_cache: dict = {}
         logger.info(
             f"[moe_affinity] 已装载 {PLUGIN_VERSION}，数据目录 {self.data_dir}"
         )
@@ -466,6 +475,159 @@ class MoeAffinityPlugin(Star):
             role_id=role_id,
         )
         return summaries.get(str(user_id))
+
+    # ------------------------------------------------------------------ 图卡
+    _AVATAR_TTL = 600
+    _AVATAR_CACHE_MAX = 300
+    # 头像接口（q4.qlogo.cn）只在 QQ 系适配器上有意义，其它平台直接不试
+    _QQ_PLATFORM_HINTS = ("aiocqhttp", "aiocq", "qq", "napcat", "onebot", "lagrange")
+
+    def _card_cfg(self) -> dict:
+        cfg = self._section("card")
+        mode = str(cfg.get("mode", "图卡") or "图卡").strip()
+        if mode not in ("图卡", "图卡+文本", "纯文本"):
+            mode = "图卡"
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "mode": mode,
+            "accent": str(cfg.get("accent", "#F6C6D3") or "#F6C6D3").strip(),
+        }
+
+    def _cards_root(self) -> Path:
+        return Path(self.data_dir) / "cards"
+
+    def _card_file_key(self, *parts) -> str:
+        """文件名键（ASCII）：内容相关字段参与哈希，分数/名次变了不会拿旧缓存图充数。"""
+        raw = "|".join(str(p) for p in parts)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+    @classmethod
+    def _is_qq_platform(cls, event: AstrMessageEvent) -> bool:
+        try:
+            name = str(event.get_platform_name() or "").lower()
+        except Exception:
+            return False
+        return any(hint in name for hint in cls._QQ_PLATFORM_HINTS)
+
+    async def _fetch_avatar_bytes(self, uid: str) -> bytes | None:
+        """头像 bytes（q4 官方接口，带 TTL 缓存；失败的也记 None 避免反复打接口）。"""
+        uid = str(uid or "").strip()
+        if not uid:
+            return None
+        now = time.monotonic()
+        cached = self._avatar_cache.get(uid)
+        if cached and (now - cached[0]) < self._AVATAR_TTL:
+            return cached[1]
+        data = await self._download_avatar_bytes(uid)
+        if len(self._avatar_cache) >= self._AVATAR_CACHE_MAX:
+            self._avatar_cache.clear()
+        self._avatar_cache[uid] = (now, data)
+        return data
+
+    @staticmethod
+    async def _download_avatar_bytes(uid: str) -> bytes | None:
+        url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={uid}&spec=640"
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.read()
+                    if data and len(data) > 1024:
+                        return data
+                    return None
+        except Exception as exc:
+            logger.debug(f"[moe_affinity] 头像下载失败: {type(exc).__name__}: {exc}")
+            return None
+
+    @staticmethod
+    def _recent_line(recent: list) -> str:
+        if not recent:
+            return ""
+        parts = [
+            f"{store.CODE_LABELS.get(item['code'], item['code'])} {int(item['delta']):+d}"
+            for item in recent
+        ]
+        return "最近互动：" + " · ".join(parts)
+
+    async def _detail_card_result(
+        self, event: AstrMessageEvent, *, uid: str, role_id: str, nickname: str,
+        title: str, snapshot: dict, mood_view=None, checkin_view=None,
+        stardust_view=None, recent: list | None = None,
+    ) -> tuple[str | None, str]:
+        """渲染关系档案卡。返回 (卡路径 | None, 纯文本)；失败回落纯文本，绝不吞错不回。"""
+        text = self._render_detail(
+            snapshot, title=title, mood_view=mood_view,
+            checkin_view=checkin_view, stardust_view=stardust_view,
+        )
+        cfg = self._card_cfg()
+        if card is None or not cfg["enabled"] or cfg["mode"] == "纯文本":
+            return None, text
+        if snapshot.get("status") != "ok":
+            return None, text
+        try:
+            now = int(time.time())
+            days = max(0, (now - int(snapshot["first_seen_at"])) // 86400)
+            gap = _human_gap(max(0, now - int(snapshot["last_interaction_at"])))
+            checkin_line = ""
+            if checkin_view:
+                streak = int(checkin_view.get("streak") or 0)
+                streak_text = f" · 连签 {streak} 天" if streak > 0 else ""
+                checkin_line = (
+                    f"签到 {checkin_view.get('score', 0)} 分"
+                    f" · 累计 {checkin_view.get('days', 0)} 天{streak_text}"
+                )
+            stardust_line = ""
+            if stardust_view:
+                stardust_line = (
+                    f"星尘 {stardust_view.get('score', 0)} 分"
+                    f" · 累计 {stardust_view.get('days', 0)} 天（抽签同步 + 送礼）"
+                )
+            avatar = (
+                await self._fetch_avatar_bytes(uid) if self._is_qq_platform(event) else None
+            )
+            path = await asyncio.to_thread(
+                card.render_detail_card,
+                title=title,
+                nickname=nickname,
+                uid=uid,
+                avatar_data=avatar,
+                score=float(snapshot["score"]),
+                stage_key=str(snapshot.get("stage") or "stranger"),
+                stage_label=str(snapshot.get("stage_label") or "陌生"),
+                next_stage_label=str(snapshot.get("next_stage_label") or ""),
+                next_stage_at=snapshot.get("next_stage_at"),
+                progress=float(snapshot.get("progress") or 0.0),
+                rank=int(snapshot.get("rank") or 1),
+                known_days=days,
+                last_gap=gap,
+                mood_line=self._mood_line(mood_view),
+                checkin_line=checkin_line,
+                stardust_line=stardust_line,
+                recent_line=self._recent_line(recent or []),
+                accent_hex=cfg["accent"],
+                cards_root=self._cards_root(),
+                file_key=self._card_file_key(
+                    "detail", role_id, uid,
+                    int(round(float(snapshot["score"]) * 10)),
+                    int(snapshot.get("rank") or 1), cfg["mode"],
+                ),
+                extra_font_dirs=card.font_dirs(self.data_dir),
+            )
+            return path, text
+        except Exception as exc:
+            logger.warning(f"[moe_affinity] 关系档案卡渲染失败，回落纯文本: {exc}")
+            return None, text
+
+    def _card_chain(self, card_path: str | None, text: str) -> list | None:
+        """图 → 结果链；「图卡+文本」模式才附文字。无卡返回 None（调用方发纯文本）。"""
+        if not card_path:
+            return None
+        comps = [Image.fromFileSystem(card_path)]
+        if self._card_cfg()["mode"] == "图卡+文本":
+            comps.append(Plain("\n" + text))
+        return comps
 
     async def _checkin_loop(self) -> None:
         """每小时扫一次「昨天 + 今天」：签到记录 + 星语抽签星尘；幂等键保证重扫不重复加分。"""
@@ -858,12 +1020,13 @@ class MoeAffinityPlugin(Star):
             mood_view = await asyncio.to_thread(self._mood_view, role_id)
             checkin_view = await self._checkin_view(role_id, target)
             stardust_view = await self._stardust_view(role_id, target)
-            yield event.plain_result(
-                self._render_detail(
-                    snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view,
-                    stardust_view=stardust_view,
-                )
+            card_path, text = await self._detail_card_result(
+                event, uid=target, role_id=role_id, nickname=target_name, title=title,
+                snapshot=snapshot, mood_view=mood_view, checkin_view=checkin_view,
+                stardust_view=stardust_view,
             )
+            chain = self._card_chain(card_path, text)
+            yield event.chain_result(chain) if chain else event.plain_result(text)
             return
 
         if not sender:
@@ -893,7 +1056,13 @@ class MoeAffinityPlugin(Star):
                 for item in recent
             ]
             text += "\n最近：" + " · ".join(parts)
-        yield event.plain_result(text)
+        card_path, card_text = await self._detail_card_result(
+            event, uid=sender, role_id=role_id, nickname=name, title=title,
+            snapshot=snapshot, mood_view=mood_view, checkin_view=checkin_view,
+            stardust_view=stardust_view, recent=recent,
+        )
+        chain = self._card_chain(card_path, card_text)
+        yield event.chain_result(chain) if chain else event.plain_result(text)
 
     @filter.command("好感榜")
     async def cmd_ranking(self, event: AstrMessageEvent):
@@ -913,10 +1082,52 @@ class MoeAffinityPlugin(Star):
         if not rows:
             yield event.plain_result(f"「{role_id}」还没有任何好感度记录。")
             return
-        lines = [f"「{role_id}」好感榜"]
+        alias = await asyncio.to_thread(self.store.role_alias, role_id)
+        lines = [f"「{alias or role_id}」好感榜"]
         for row in rows:
             name = row["display_name"] or row["user_id"]
             lines.append(f"{row['rank']}. {name} — {int(row['score'])} · {row['stage_label']}")
+        # 图卡（失败回落纯文本，绝不吞错不回）
+        card_path = None
+        cfg = self._card_cfg()
+        if card is not None and cfg["enabled"] and cfg["mode"] != "纯文本":
+            try:
+                avatars = (
+                    [await self._fetch_avatar_bytes(str(row["user_id"])) for row in rows]
+                    if self._is_qq_platform(event) else []
+                )
+                card_rows = [
+                    (
+                        int(row["rank"]),
+                        str(row["display_name"] or row["user_id"]),
+                        str(int(round(float(row["score"])))),
+                        str(row["stage_label"] or ""),
+                        str(row.get("stage") or ""),
+                    )
+                    for row in rows
+                ]
+                card_path = await asyncio.to_thread(
+                    card.render_rank_card,
+                    title="好感榜",
+                    subtitle="萌萌好感度 · 角色内排行",
+                    role_label=f"「{alias}」" if alias else "",
+                    rows=card_rows,
+                    avatars=avatars,
+                    accent_hex=cfg["accent"],
+                    cards_root=self._cards_root(),
+                    file_key=self._card_file_key(
+                        "rank", role_id, limit, len(rows),
+                        max(int(row["score"]) for row in rows),
+                    ),
+                    footer=f"参与 {len(card_rows)} 人 · 取前 {limit} 名",
+                    extra_font_dirs=card.font_dirs(self.data_dir),
+                )
+            except Exception as exc:
+                logger.warning(f"[moe_affinity] 好感榜图卡渲染失败，回落纯文本: {exc}")
+                card_path = None
+        if card_path:
+            yield event.image_result(card_path)
+            return
         yield event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------ LLM 工具

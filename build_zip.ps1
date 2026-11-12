@@ -70,6 +70,7 @@ $includeList = @(
     "checkin_sync.py",
     "stardust_sync.py",
     "webui_api.py",
+    "card.py",
     "pages",
     "_conf_schema.json",
     "metadata.yaml",

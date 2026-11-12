@@ -253,6 +253,35 @@
       }
     }
   },
+  "card": {
+    "type": "object",
+    "description": "指令图卡",
+    "hint": "把 /好感度 与 /好感榜 的回复渲染成图卡（风格与萌萌星语同源）。渲染失败或本机没有可用中文字体时自动回落纯文本，不影响指令本身。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用图卡",
+        "default": true
+      },
+      "mode": {
+        "type": "string",
+        "description": "出卡方式",
+        "hint": "图卡：只发卡；图卡+文本：卡面后附一段文字明细；纯文本：不渲染，维持旧版文字回复。",
+        "options": [
+          "图卡",
+          "图卡+文本",
+          "纯文本"
+        ],
+        "default": "图卡"
+      },
+      "accent": {
+        "type": "string",
+        "description": "主题色（十六进制）",
+        "hint": "卡面渐变底色，默认 #F6C6D3（樱粉）。档位徽章配色固定与档位绑定，不随主题色变化。",
+        "default": "#F6C6D3"
+      }
+    }
+  },
   "advanced": {
     "type": "object",
     "description": "高级",
