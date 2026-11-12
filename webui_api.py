@@ -27,7 +27,7 @@ try:  # quart 是 AstrBot 的运行期依赖
 except Exception:  # pragma: no cover - 仅本地静态检查时缺失
     request = None  # type: ignore
 
-from . import checkin_sync, migrate_self_learning, rules_info, store
+from . import checkin_sync, migrate_self_learning, rules_info, stardust_sync, store
 
 ROUTE_PREFIX = "/astrbot_plugin_moe_affinity"
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -256,6 +256,14 @@ async def h_users(plugin) -> dict:
             summary = summaries.get(row["user_id"]) or {}
             row["checkin_score"] = summary.get("score", 0.0)
             row["checkin_days"] = summary.get("days", 0)
+        # 星尘列（v0.13.3）：抽签同步 + 送礼合计，口径同主分数
+        sd = plugin.store.user_source_summaries(
+            source=stardust_sync.SOURCE, user_ids=[r["user_id"] for r in rows], role_id=role
+        )
+        for row in rows:
+            summary = sd.get(row["user_id"]) or {}
+            row["stardust_score"] = summary.get("score", 0.0)
+            row["stardust_days"] = summary.get("days", 0)
     return ok(data)
 
 
@@ -269,6 +277,7 @@ async def h_user(plugin) -> dict:
     )
     data["role_id"] = role
     data["checkin"] = await plugin._checkin_view(role, user_id)
+    data["stardust"] = await plugin._stardust_view(role, user_id)
     return ok(data)
 
 
@@ -697,6 +706,31 @@ async def h_checkin_sync(plugin) -> dict:
     return ok(stats)
 
 
+async def h_stardust_status(plugin) -> dict:
+    """星尘同步状态卡（v0.13.3）：对方库概况 + 本插件已导入量，镜像签到状态卡。"""
+    cfg = plugin._stardust_cfg()
+    info = stardust_sync.describe(plugin._stardust_db_path())
+    info["enabled"] = cfg["enabled"]
+    info["scale"] = cfg["scale"]
+    info["imported"] = plugin.store.user_source_total(source=stardust_sync.SOURCE)
+    return ok(info)
+
+
+async def h_stardust_sync(plugin) -> dict:
+    """手动触发星尘同步：full=True 导入全部历史，否则只同步最近两天（幂等）。"""
+    body = await _payload()
+    full = bool(body.get("full"))
+    path = plugin._stardust_db_path()
+    if path is None:
+        return err("没找到萌萌星语的 star_whisper.db（未安装？或可在配置里手动指定路径）")
+    cfg = plugin._stardust_cfg()
+    fn = stardust_sync.sync_full if full else stardust_sync.sync_recent
+    stats = await asyncio.to_thread(
+        fn, plugin.store, path, scale=cfg["scale"], rules=plugin._rules()
+    )
+    return ok(stats)
+
+
 def _aiocqhttp_platforms(plugin) -> list:
     try:
         insts = plugin.context.platform_manager.platform_insts
@@ -989,6 +1023,8 @@ def register_apis(plugin) -> None:
         ("/sync", h_sync, ["POST"]),
         ("/checkin/status", h_checkin_status, ["GET"]),
         ("/checkin/sync", h_checkin_sync, ["POST"]),
+        ("/stardust/status", h_stardust_status, ["GET"]),
+        ("/stardust/sync", h_stardust_sync, ["POST"]),
         ("/avatars", h_avatars, ["GET"]),
         ("/rank", h_rank, ["GET"]),
         ("/audit", h_audit, ["GET"]),

@@ -170,6 +170,8 @@ export interface UserRow {
   last_interaction_at: number;
   checkin_score?: number;
   checkin_days?: number;
+  stardust_score?: number;
+  stardust_days?: number;
 }
 
 export interface UsersPage {
@@ -215,6 +217,7 @@ export interface UserDetail {
   }[];
   group_delta_total?: number;
   checkin?: { score: number; days: number; last_at: number; streak: number } | null;
+  stardust?: { score: number; days: number; last_at: number } | null;
 }
 
 export interface GroupRow {
@@ -454,6 +457,26 @@ export interface CheckinSyncStats {
 export const apiCheckinStatus = () => apiGet<CheckinStatus>("/checkin/status");
 export const apiCheckinSync = (full = false) =>
   apiPost<CheckinSyncStats>("/checkin/sync", { full }, 120000);
+
+// 星尘同步（v0.13.3，萌萌星语）：对方库没有「人」维度，records 是抽签正项流水数
+export interface StardustStatus {
+  exists: boolean;
+  path: string;
+  records: number;
+  first_date: string;
+  last_date: string;
+  enabled: boolean;
+  scale: number;
+  imported?: { events: number; users: number; last_at?: number };
+}
+export interface StardustSyncStats {
+  status?: string;
+  records: number;
+  written: number;
+}
+export const apiStardustStatus = () => apiGet<StardustStatus>("/stardust/status");
+export const apiStardustSync = (full = false) =>
+  apiPost<StardustSyncStats>("/stardust/sync", { full }, 120000);
 export const apiAvatars = (kind: "user" | "group", ids: string[], force = false) => {
   const p = new URLSearchParams({ type: kind, ids: ids.join(",") });
   if (force) p.set("force", "1");

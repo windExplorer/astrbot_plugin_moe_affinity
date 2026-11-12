@@ -59,6 +59,7 @@ const roleLabel = computed(() => {
 });
 const today = computed(() => detail.value?.today);
 const checkin = computed(() => detail.value?.checkin);
+const stardust = computed(() => detail.value?.stardust);
 const todayGainRatio = computed(() => {
   const value = today.value;
   if (!value || !value.gain_cap) return 0;
@@ -272,6 +273,21 @@ function saved() {
         <span v-if="checkin.last_at" class="faint">最近签到 {{ timeAgo(checkin.last_at) }}</span>
       </div>
       <div v-else class="empty">还没有签到数据（画境拾珍未安装，或还没同步到）</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <div class="card-t">星尘</div>
+        <div class="spacer"></div>
+        <div class="card-s">来自萌萌星语 · 已计入上方总分（本角色内口径），不占每日上限</div>
+      </div>
+      <div v-if="stardust && stardust.days > 0" class="row">
+        <span class="pill">心意值 {{ stardust.score }}</span>
+        <span class="faint">累计 {{ stardust.days }} 天（抽签同步 + 送礼）</span>
+        <div class="spacer"></div>
+        <span v-if="stardust.last_at" class="faint">最近 {{ timeAgo(stardust.last_at) }}</span>
+      </div>
+      <div v-else class="empty">还没有星尘数据（萌萌星语未安装，或还没同步到）</div>
     </div>
 
     <div class="card">

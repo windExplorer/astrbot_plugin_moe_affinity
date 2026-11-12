@@ -6,9 +6,12 @@ import {
   apiMigrateApply,
   apiMigratePreview,
   apiMigrateRepair,
+  apiStardustStatus,
+  apiStardustSync,
   apiRoles,
   type CheckinStatus,
   type MigratePreview,
+  type StardustStatus,
   type RoleRow,
 } from "../api";
 import { app, notify } from "../state";
@@ -19,6 +22,8 @@ const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
 const checkinSyncing = ref(false);
 const checkin = ref<CheckinStatus | null>(null);
+const stardustSyncing = ref(false);
+const stardust = ref<StardustStatus | null>(null);
 const path = ref("");
 const clearMood = ref(true);
 const roles = ref<RoleRow[]>([]);
@@ -41,6 +46,7 @@ async function load() {
     }
     await reloadPreview();
     await loadCheckin();
+    await loadStardust();
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -53,6 +59,31 @@ async function loadCheckin() {
     checkin.value = await apiCheckinStatus();
   } catch {
     checkin.value = null;
+  }
+}
+
+async function loadStardust() {
+  try {
+    stardust.value = await apiStardustStatus();
+  } catch {
+    stardust.value = null;
+  }
+}
+
+async function stardustSync(full: boolean) {
+  stardustSyncing.value = true;
+  try {
+    const res = await apiStardustSync(full);
+    if (full) {
+      notify(res.written > 0 ? `导入完成：新写入 ${res.written} 条` : "没有新数据（都已导入过）");
+    } else {
+      notify(res.written > 0 ? `同步完成：新写入 ${res.written} 条` : "已是最新，没有新数据");
+    }
+    await loadStardust();
+  } catch (e: any) {
+    notify(e?.message || String(e), true);
+  } finally {
+    stardustSyncing.value = false;
   }
 }
 
@@ -206,6 +237,34 @@ onMounted(load);
       档位/榜单/进度条直接可见，不占每日上限；「签到」列与用户详情的签到卡都是<b>角色内口径</b>
       （即总分里签到占的那部分）。每小时自动同步「昨天+今天」；用户用 /好感度 查询时会顺手补一次（防重读）。
       「导入全部历史」把对方所有签到记录按当前角色关系折算进来，重复点击是安全的。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <div class="card-t">星尘好感同步（萌萌星语）</div>
+      <div class="spacer"></div>
+      <n-button size="small" quaternary :loading="stardustSyncing" @click="stardustSync(false)">
+        立即同步
+      </n-button>
+      <n-button size="small" quaternary :loading="stardustSyncing" @click="stardustSync(true)">
+        导入全部历史
+      </n-button>
+    </div>
+    <div class="muted">
+      <template v-if="stardust?.exists">
+        已找到对方库（{{ stardust.records }} 条抽签流水<template v-if="stardust.first_date">，{{ stardust.first_date }} 起</template>）
+        · 已导入 {{ stardust.imported?.events ?? 0 }} 条（按角色展开）、覆盖 {{ stardust.imported?.users ?? 0 }} 人
+        <span v-if="stardust.imported?.last_at" class="faint">· 最近一次 {{ timeAgo(stardust.imported.last_at) }}</span>
+        <span class="faint">· 系数 ×{{ stardust.scale }}</span>
+      </template>
+      <template v-else>没找到萌萌星语的 star_whisper.db —— 未安装时忽略本卡片即可。</template>
+    </div>
+    <div class="faint" style="margin-top: 6px">
+      抽签星尘按系数<b>并入主分数</b>：只同步抽签正项（reason='draw'），消费不回扣（花钱 ≠ 变冷淡）、
+      管理员手动发放不转；送礼走星语侧的契约实时写入，不经本卡片。「星尘」列与用户详情的星尘卡都是<b>角色内口径</b>。
+      每小时自动同步「昨天+今天」；用户用 /好感度 查询时会顺手补一次（防重读）。
+      「导入全部历史」把对方所有抽签流水按当前系数折算进来，重复点击是安全的。
     </div>
   </div>
 

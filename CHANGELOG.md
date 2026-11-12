@@ -1,5 +1,19 @@
 # 更新日志
 
+## v0.13.3 (2026-11-12)
+
+**控制台补齐星尘联动的 WebUI 部分**（后端循环 v0.13.0 就有，但面板一直欠着）。
+
+- **用户列表**：「星尘」列（照签到列模式，`h_users` 经 `user_source_summaries`
+  补 `stardust_score/stardust_days`，角色内口径）；
+- **用户详情**：星尘卡（心意值 / 累计天数 / 最近一次，同签到卡版式）；
+- **数据页**：星尘同步状态卡（对方库概况 + 已导入量 + 系数）与「立即同步 /
+  导入全部历史」按钮（`/stardust/status`、`/stardust/sync`，逻辑直接复用
+  `stardust_sync.sync_full/sync_recent`，幂等）；
+- 前端重建 `pages/affinity-console`。
+
+版本 v0.13.2 -> v0.13.3。
+
 ## v0.13.2 (2026-11-12)
 
 **契约新增 ``sync_info``：把星尘同步的生效系数暴露给调用方**（星语卡面要显示
