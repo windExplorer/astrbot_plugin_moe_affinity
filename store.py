@@ -45,6 +45,8 @@ CODE_LABELS: dict[str, str] = {
     "manual.merge": "角色归并",
     "import.seed": "迁移导入",
     "checkin.checkin": "签到",
+    "stardust.draw": "星尘",
+    "stardust.gift": "送礼",
 }
 
 SCHEMA = """

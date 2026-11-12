@@ -222,6 +222,37 @@
       }
     }
   },
+  "stardust_sync": {
+    "type": "object",
+    "description": "星尘好感同步（萌萌星语）",
+    "hint": "只读 astrbot_plugin_moe_star_whisper 的 star_whisper.db，把每日抽签获得的星尘按系数并入主分数：写到该用户有记录的每个角色各一份，不占每日上限。只同步抽签正项，消费不回扣、手动发放不转。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用星尘同步",
+        "hint": "对方插件未安装时同步静默待机，不影响本插件其它功能。",
+        "default": true
+      },
+      "scale": {
+        "type": "float",
+        "description": "分数系数",
+        "hint": "抽签事件按对方当日星尘实得 × 此系数入库。默认 0.2（每天抽签约 +2 分），想放大可调（如 0.5）。",
+        "default": 0.2
+      },
+      "inject": {
+        "type": "bool",
+        "description": "注入时附带星尘信息",
+        "hint": "在好感度注入块里追加一句「TA 常来抽签问星、也送过礼」。",
+        "default": true
+      },
+      "db_path": {
+        "type": "string",
+        "description": "对方数据库路径（留空自动定位）",
+        "hint": "默认 data/plugin_data/astrbot_plugin_moe_star_whisper/star_whisper.db，仅对方装在非默认位置时需要填。",
+        "default": ""
+      }
+    }
+  },
   "advanced": {
     "type": "object",
     "description": "高级",

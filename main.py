@@ -20,7 +20,17 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import checkin_sync, migrate_self_learning, mood, personas, rules_info, scoring, store, webui_api
+from . import (
+    checkin_sync,
+    migrate_self_learning,
+    mood,
+    personas,
+    rules_info,
+    scoring,
+    stardust_sync,
+    store,
+    webui_api,
+)
 
 PLUGIN_NAME = "astrbot_plugin_moe_affinity"
 API_VERSION = "affinity.v1"
@@ -48,7 +58,7 @@ def _reload_sibling_modules() -> None:
     """AstrBot 热更新只重载 main.py，依赖模块会残留在 sys.modules 里跑旧代码。"""
     for module in (
         store, scoring, mood, personas, rules_info, migrate_self_learning,
-        checkin_sync, webui_api,
+        checkin_sync, stardust_sync, webui_api,
     ):
         try:
             importlib.reload(module)
@@ -125,6 +135,85 @@ class AffinityApi:
             dedupe_key=dedupe_key,
             display_name=display_name,
         )
+
+    async def gift_to_user(
+        self,
+        user_id: str,
+        *,
+        delta: float,
+        client_ref: str,
+        evidence: str = "",
+        display_name: str = "",
+    ) -> dict:
+        """星语送礼：把一笔小额好感写到该用户**有记录的每个角色**（不新建角色）。
+
+        展开口径与签到/星尘同步一致（用户明确选择：私聊角色 A、群聊角色 B 都能
+        感受到心意）；没有任何角色记录的用户返回 ``status="no_role"``，调用方
+        （星语）应据此不扣星尘，等 TA 聊过天再送。
+        """
+        plugin = self._plugin
+
+        def _write() -> dict:
+            uid = str(user_id or "").strip()
+            ref = str(client_ref or "").strip()
+            if not uid or not ref:
+                return {"status": "invalid", "message": "user_id / client_ref 不能为空"}
+            roles = plugin.store.roles_of_users([uid]).get(uid, [])
+            if not roles:
+                return {"status": "no_role", "message": "该用户还没有任何好感记录（先聊聊天吧）"}
+            rules = plugin._rules()
+            applied_roles = []
+            for role_id in roles:
+                snapshot = plugin.store.apply_event(
+                    role_id=role_id,
+                    user_id=uid,
+                    code=stardust_sync.CODE_GIFT,
+                    delta=float(delta),
+                    source=stardust_sync.SOURCE,
+                    rules=rules,
+                    evidence=evidence,
+                    dedupe_key=stardust_sync.gift_dedupe_key(role_id, uid, ref),
+                    display_name=display_name,
+                )
+                if snapshot.get("status") == "ok":
+                    applied_roles.append(role_id)
+            return {"status": "ok", "roles": applied_roles, "delta": float(delta)}
+
+        return await asyncio.to_thread(_write)
+
+    async def best_tier(self, user_id: str) -> dict:
+        """跨角色取该用户的最高好感快照（星语档位特权用）。
+
+        取最高与角色归并同一口径：关系有多好，最好的那段关系就是证据。
+        没有任何记录返回 ``status="no_record"``，调用方安全降级（不加成）。
+        """
+        plugin = self._plugin
+
+        def _read() -> dict:
+            uid = str(user_id or "").strip()
+            if not uid:
+                return {"status": "no_record"}
+            roles = plugin.store.roles_of_users([uid]).get(uid, [])
+            rules = plugin._rules()
+            best = None
+            for role_id in roles:
+                snap = plugin.store.snapshot(role_id, uid, rules)
+                if snap.get("status") != "ok":
+                    continue
+                if best is None or float(snap.get("score") or 0) > float(best.get("score") or 0):
+                    best = snap
+            if best is None:
+                return {"status": "no_record"}
+            return {
+                "status": "ok",
+                "role_id": best.get("role_id"),
+                "score": best.get("score"),
+                "stage": best.get("stage"),
+                "stage_label": best.get("stage_label"),
+                "stage_floor": best.get("stage_floor"),
+            }
+
+        return await asyncio.to_thread(_read)
 
 
 @register(
@@ -306,8 +395,64 @@ class MoeAffinityPlugin(Star):
             data_dir = None
         return checkin_sync.resolve_db_path(self._checkin_cfg()["db_path"], data_dir)
 
+    def _stardust_cfg(self) -> dict:
+        cfg = self._section("stardust_sync")
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "scale": float(cfg.get("scale", 0.2) or 0.2),
+            "inject": bool(cfg.get("inject", True)),
+            "db_path": str(cfg.get("db_path") or "").strip(),
+        }
+
+    def _stardust_db_path(self):
+        """定位萌萌星语的库（对方没装返回 None，同步静默待机）。"""
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            data_dir = Path(get_astrbot_data_path())
+        except Exception:
+            data_dir = None
+        return stardust_sync.resolve_db_path(self._stardust_cfg()["db_path"], data_dir)
+
+    async def _ensure_stardust_fresh(self, user_id: str) -> None:
+        """查询指令触发的按需同步；带防重读（今天已有事件 / 60 秒节流），失败静默。"""
+        cfg = self._stardust_cfg()
+        if not cfg["enabled"] or not user_id:
+            return
+        try:
+            path = self._stardust_db_path()
+            if path is None:
+                return
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    stardust_sync.ensure_user_fresh,
+                    self.store,
+                    path,
+                    str(user_id),
+                    scale=cfg["scale"],
+                    rules=self._rules(),
+                ),
+                timeout=6,
+            )
+        except Exception as exc:
+            logger.debug(f"[moe_affinity] 星尘按需同步跳过: {exc}")
+
+    async def _stardust_view(self, role_id: str, user_id: str) -> dict | None:
+        """本角色内的星尘概况（指令明细行 / 注入 / 控制台共用）。
+
+        口径与主分数一致：只统计该角色内的星尘事件（抽签同步 + 送礼），
+        score 就是这段关系总分里星尘占的那部分。
+        """
+        summaries = await asyncio.to_thread(
+            self.store.user_source_summaries,
+            source=stardust_sync.SOURCE,
+            user_ids=[str(user_id)],
+            role_id=role_id,
+        )
+        return summaries.get(str(user_id))
+
     async def _checkin_loop(self) -> None:
-        """每小时扫一次「昨天 + 今天」的签到记录；幂等键保证重扫不重复加分。"""
+        """每小时扫一次「昨天 + 今天」：签到记录 + 星语抽签星尘；幂等键保证重扫不重复加分。"""
         await asyncio.sleep(180)  # 错开启动高峰，等其它插件装载完
         while True:
             try:
@@ -326,6 +471,22 @@ class MoeAffinityPlugin(Star):
                             logger.info(f"[moe_affinity] 签到同步 +{stats['written']} 条")
             except Exception as exc:
                 logger.warning(f"[moe_affinity] 签到同步失败: {exc}")
+            try:
+                scfg = self._stardust_cfg()
+                if scfg["enabled"]:
+                    path = self._stardust_db_path()
+                    if path is not None:
+                        stats = await asyncio.to_thread(
+                            stardust_sync.sync_recent,
+                            self.store,
+                            path,
+                            scale=scfg["scale"],
+                            rules=self._rules(),
+                        )
+                        if stats.get("written"):
+                            logger.info(f"[moe_affinity] 星尘同步 +{stats['written']} 条")
+            except Exception as exc:
+                logger.warning(f"[moe_affinity] 星尘同步失败: {exc}")
             await asyncio.sleep(self._checkin_cfg()["interval_minutes"] * 60)
 
     async def _ensure_checkin_fresh(self, user_id: str) -> None:
@@ -422,7 +583,7 @@ class MoeAffinityPlugin(Star):
 
     def _render_detail(
         self, snapshot: dict, *, title: str, mood_view: dict | None = None,
-        checkin_view: dict | None = None,
+        checkin_view: dict | None = None, stardust_view: dict | None = None,
     ) -> str:
         if snapshot.get("status") != "ok":
             return f"{title}\n暂无好感度记录（还没聊过，或数据未就绪）。"
@@ -452,6 +613,11 @@ class MoeAffinityPlugin(Star):
             lines.append(
                 f"签到：{checkin_view.get('score', 0)} 分"
                 f" · 累计 {checkin_view.get('days', 0)} 天{streak_text}"
+            )
+        if stardust_view:
+            lines.append(
+                f"星尘：{stardust_view.get('score', 0)} 分"
+                f" · 累计 {stardust_view.get('days', 0)} 天（抽签同步 + 送礼）"
             )
         return "\n".join(lines)
 
@@ -547,16 +713,22 @@ class MoeAffinityPlugin(Star):
                 if self._checkin_cfg()["inject"]
                 else None
             )
+            stardust_view = (
+                await self._stardust_view(role_id, user_id)
+                if self._stardust_cfg()["inject"]
+                else None
+            )
         except Exception as exc:
             logger.warning(f"[moe_affinity] 读取好感度失败: {exc}")
             return
         if snapshot.get("status") != "ok":
             return
-        block = self._render_block(snapshot, mood_view, checkin_view)
+        block = self._render_block(snapshot, mood_view, checkin_view, stardust_view)
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + "\n" + block
 
     def _render_block(
-        self, snapshot: dict, mood_view: dict | None = None, checkin_view: dict | None = None
+        self, snapshot: dict, mood_view: dict | None = None, checkin_view: dict | None = None,
+        stardust_view: dict | None = None,
     ) -> str:
         cfg = self._section("inject")
         now = int(time.time())
@@ -570,6 +742,8 @@ class MoeAffinityPlugin(Star):
             body += f"心情：{mood_view.get('description', '')}。"
         if checkin_view:
             body += f"签到累计 {checkin_view.get('days', 0)} 天（亲密度 {checkin_view.get('score', 0)}）。"
+        if stardust_view:
+            body += f"TA 常来抽签问星、也送过礼（心意值 {stardust_view.get('score', 0)}）。"
         if cfg.get("include_hint", True):
             body += "这是表达参考：不要向用户播报分数，也不要把它当作权限或事实依据。"
         limit = int(cfg.get("max_chars", 140) or 140)
@@ -650,8 +824,10 @@ class MoeAffinityPlugin(Star):
             )
             return
 
-        # 查询前顺手补一次签到同步（带防重读：今天已有事件 / 60 秒节流）
-        await self._ensure_checkin_fresh(target if (target and target != sender) else sender)
+        # 查询前顺手补一次签到 / 星尘同步（带防重读：今天已有事件 / 60 秒节流）
+        fresh_target = target if (target and target != sender) else sender
+        await self._ensure_checkin_fresh(fresh_target)
+        await self._ensure_stardust_fresh(fresh_target)
 
         if target and target != sender:
             if not admin:
@@ -665,9 +841,11 @@ class MoeAffinityPlugin(Star):
             )
             mood_view = await asyncio.to_thread(self._mood_view, role_id)
             checkin_view = await self._checkin_view(role_id, target)
+            stardust_view = await self._stardust_view(role_id, target)
             yield event.plain_result(
                 self._render_detail(
-                    snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
+                    snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view,
+                    stardust_view=stardust_view,
                 )
             )
             return
@@ -688,8 +866,10 @@ class MoeAffinityPlugin(Star):
         title = f"你与「{alias}」的关系" if alias else f"「{name}」的好感度"
         mood_view = await asyncio.to_thread(self._mood_view, role_id)
         checkin_view = await self._checkin_view(role_id, sender)
+        stardust_view = await self._stardust_view(role_id, sender)
         text = self._render_detail(
-            snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view
+            snapshot, title=title, mood_view=mood_view, checkin_view=checkin_view,
+            stardust_view=stardust_view,
         )
         if recent:
             parts = [
@@ -741,10 +921,12 @@ class MoeAffinityPlugin(Star):
         elif who != sender and not self._is_admin(event):
             return '{"status":"denied","message":"普通成员只能查询自己的好感度。"}'
         await self._ensure_checkin_fresh(who)
+        await self._ensure_stardust_fresh(who)
         role_id, persona_id = await self._role_for(event)
         snapshot = await asyncio.to_thread(self.store.snapshot, role_id, who, self._rules())
         snapshot.update(role_id=role_id, persona_id=persona_id, read_only=True)
         snapshot["checkin"] = await self._checkin_view(role_id, who)
+        snapshot["stardust"] = await self._stardust_view(role_id, who)
         return json.dumps(snapshot, ensure_ascii=False)
 
     async def terminate(self):
