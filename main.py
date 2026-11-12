@@ -777,7 +777,7 @@ class MoeAffinityPlugin(Star):
                 gap_to_next = f"（距{next_label}还差 {need}）"
         lines = [
             title,
-            f"总分：{int(snapshot['score'])} · {snapshot['stage_label']}{gap_to_next}",
+            f"总分：{float(snapshot['score']):.2f} · {snapshot['stage_label']}{gap_to_next}",
             f"排名：{snapshot['rank']}",
             f"认识 {days} 天 · 最近互动 {gap}",
         ]

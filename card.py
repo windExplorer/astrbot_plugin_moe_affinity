@@ -378,7 +378,7 @@ def render_detail_card(
     draw.line([(left, ctx["y"]), (right, ctx["y"])], fill=ctx["line"], width=1)
     ctx["y"] += int(18 * u)
     score_font = _font(ctx["disp"], int(84 * u))
-    score_text = f"{int(round(float(score)))}"
+    score_text = f"{float(score):.2f}"
     stage_rgb = _hex_rgb(stage_color(stage_key))
     lum = 0.299 * stage_rgb[0] + 0.587 * stage_rgb[1] + 0.114 * stage_rgb[2]
     pill_font = _font(ctx["disp"], int(28 * u))
