@@ -36,6 +36,12 @@ def test_constants():
     check(store.CODE_LABELS.get("stardust.draw") == "星尘", "CODE_LABELS 有星尘条目")
     check(store.CODE_LABELS.get("stardust.gift") == "送礼", "CODE_LABELS 有送礼条目")
 
+    # v0.13.2：契约暴露 sync_info（星语卡面折算预期读这里，口径唯一来源是本插件配置）
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    check("async def sync_info" in main_src, "契约有 sync_info 方法")
+    check('_stardust_cfg()["scale"]' in main_src or 'cfg["scale"]' in main_src,
+          "sync_info 读的是 stardust_sync 配置（不是第二份硬编码）")
+
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
     check("stardust_sync" in schema, "schema 有 stardust_sync 分组")
     node = schema.get("stardust_sync") or {}

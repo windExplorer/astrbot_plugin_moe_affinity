@@ -215,6 +215,21 @@ class AffinityApi:
 
         return await asyncio.to_thread(_read)
 
+    async def sync_info(self) -> dict:
+        """星尘同步的生效配置（星语卡面展示折算预期用）。
+
+        口径唯一来源是本插件的 ``stardust_sync`` 配置：调用方（星语）读这里的
+        scale 来显示「抽签预计 +N 好感度」，两边数字天然同源，不存在各配一份
+        的漂移。旧版调用方没有本方法时安全降级（不显示即可）。
+        """
+        cfg = self._plugin._stardust_cfg()
+        return {
+            "status": "ok",
+            "source": stardust_sync.SOURCE,
+            "enabled": bool(cfg["enabled"]),
+            "scale": float(cfg["scale"]),
+        }
+
 
 @register(
     PLUGIN_NAME,
