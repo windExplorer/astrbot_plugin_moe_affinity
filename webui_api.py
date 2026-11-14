@@ -200,16 +200,18 @@ def _default_role(plugin, default_pid: str) -> str | None:
         return None
 
 
-def _resolve_role(plugin, role: str | None = None) -> str:
+async def _resolve_role(plugin, role: str | None = None) -> str:
     """没传 role 时取「当前默认人格对应的角色」，而不是库里最早建的那个。
 
     老实现取 ``list_roles()[0]``，而列表按 created_at 升序 —— 换了默认人格后
     控制台总览/用户列表仍锁死在最初的角色上，看上去像「没切换」。
+    这里与角色页共用 ``_current_default()``，保证默认视角和显示的人格同源。
     """
     role_id = (role or "").strip()
     if role_id:
         return role_id
-    default_role = _default_role(plugin, personas.default_persona_id(plugin.context))
+    detail = await _current_default(plugin)
+    default_role = _default_role(plugin, detail["persona_id"])
     if default_role:
         return default_role
     roles = plugin.store.list_roles()
@@ -308,7 +310,7 @@ async def h_roles(plugin) -> dict:
 
 
 async def h_overview(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     days = _qi("days", 30, 1, 180)
     data = plugin.store.overview(role, plugin._rules(), days=days)
     data["role_name"] = next(
@@ -319,7 +321,7 @@ async def h_overview(plugin) -> dict:
 
 
 async def h_users(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     data = plugin.store.list_users(
         role,
         plugin._rules(),
@@ -353,7 +355,7 @@ async def h_users(plugin) -> dict:
 
 
 async def h_user(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     user_id = _q("id")
     if not user_id:
         return err("缺少 id")
@@ -367,7 +369,7 @@ async def h_user(plugin) -> dict:
 
 
 async def h_groups(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     rows = plugin.store.group_rows(role, plugin._rules())
     return ok(
         {
@@ -380,7 +382,7 @@ async def h_groups(plugin) -> dict:
 
 
 async def h_group(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     group_id = _q("id")
     if not group_id:
         return err("缺少 id")
@@ -390,7 +392,7 @@ async def h_group(plugin) -> dict:
 
 
 async def h_rank(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     limit = _qi("limit", 20, 1, 200)
     rows = plugin.store.ranking(role, plugin._rules(), limit=limit)
     return ok({"items": rows, "role_id": role, "limit": limit})
@@ -451,7 +453,7 @@ async def h_conflicts(plugin) -> dict:
 # ---------------------------------------------------------------------- 写入
 async def h_score(plugin) -> dict:
     body = await _payload()
-    role = _resolve_role(plugin, str(body.get("role") or ""))
+    role = await _resolve_role(plugin, str(body.get("role") or ""))
     user_id = str(body.get("id") or "").strip()
     if not user_id:
         return err("缺少 id")
@@ -482,7 +484,7 @@ async def h_score(plugin) -> dict:
 
 async def h_reset(plugin) -> dict:
     body = await _payload()
-    role = _resolve_role(plugin, str(body.get("role") or ""))
+    role = await _resolve_role(plugin, str(body.get("role") or ""))
     user_id = str(body.get("id") or "").strip()
     if not user_id:
         return err("缺少 id")
@@ -529,7 +531,7 @@ async def h_set_config(plugin) -> dict:
 
 
 async def h_mood(plugin) -> dict:
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     return ok(plugin._mood_view(role))
 
 
@@ -656,7 +658,7 @@ def _legacy_db_path(plugin, explicit: str | None = None) -> Path | None:
 
 async def h_migrate_preview(plugin) -> dict:
     path = _legacy_db_path(plugin, _q("path"))
-    role = _resolve_role(plugin, _q("role"))
+    role = await _resolve_role(plugin, _q("role"))
     if path is None:
         return ok(
             {
@@ -704,7 +706,7 @@ async def h_migrate_apply(plugin) -> dict:
     path = _legacy_db_path(plugin, str(body.get("path") or "") or None)
     if path is None:
         return err("没找到老库文件")
-    role = _resolve_role(plugin, str(body.get("role") or ""))
+    role = await _resolve_role(plugin, str(body.get("role") or ""))
     wanted = body.get("user_ids")
     wanted_set = {str(item) for item in wanted} if isinstance(wanted, list) else None
     try:
@@ -766,7 +768,7 @@ async def h_set_first_seen(plugin) -> dict:
     纯私聊用户也没有入群时间可查——只能人工指定。允许任意方向调整（显式人工意图）。
     """
     body = await _payload()
-    role = _resolve_role(plugin, str(body.get("role") or ""))
+    role = await _resolve_role(plugin, str(body.get("role") or ""))
     user_id = str(body.get("id") or "").strip()
     if not user_id:
         return err("缺少 id")
@@ -855,7 +857,7 @@ async def h_migrate_repair(plugin) -> dict:
     path = _legacy_db_path(plugin, str(body.get("path") or "") or None)
     if path is None:
         return err("没找到老库文件")
-    role = _resolve_role(plugin, str(body.get("role") or ""))
+    role = await _resolve_role(plugin, str(body.get("role") or ""))
     try:
         legacy = migrate_self_learning.read_legacy(path)
     except Exception as exc:

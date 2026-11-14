@@ -156,6 +156,19 @@ async def async_default_persona(context, umo: str = "") -> str:
     return ""
 
 
+async def _runtime_default(context, umo: str) -> str:
+    """运行时取「全局默认人格」：核心 API 优先，拿不到才用同步读取兜底。
+
+    v0.15.2 只把控制台的显示改成核心 API，记分链路仍用同步的
+    ``default_persona_id()``（在部分版本上会回落启动快照），于是出现
+    「控制台显示 V5、分数却记到 V4」。两条链路必须同源。
+    """
+    core_pid = await async_default_persona(context, umo)
+    if core_pid and core_pid != DEFAULT_PERSONA:
+        return core_pid
+    return default_persona_id(context, umo)
+
+
 async def resolve_persona_id(context, event) -> str:
     """解析当前事件最终生效的人格 id（与 AstrBot 回复时用的那一套优先级一致）。"""
     umo = str(getattr(event, "unified_msg_origin", "") or "")
@@ -189,8 +202,8 @@ async def resolve_persona_id(context, event) -> str:
         except Exception:
             pass
 
-    # 3) 全局默认人格（动态读配置，不用启动时的快照）
-    return default_persona_id(context, umo)
+    # 3) 全局默认人格：与 AstrBot 回复时同源，不再用启动快照
+    return await _runtime_default(context, umo)
 
 
 async def explain(context, event) -> dict:
@@ -232,7 +245,7 @@ async def explain(context, event) -> dict:
         except Exception as exc:
             info["conversation_persona"] = f"<读取失败: {exc}>"
 
-    info["default_persona"] = default_persona_id(context, umo)
+    info["default_persona"] = await _runtime_default(context, umo)
 
     if info["session_override"] and not info["session_override"].startswith("<"):
         info["resolved"] = info["session_override"]

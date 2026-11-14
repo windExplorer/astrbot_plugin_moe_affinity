@@ -884,6 +884,21 @@ def test_persona_switch():
     got = asyncio.run(personas.async_default_persona(core_ctx))
     check("核心 API 拿到当前默认人格", got == "persona_v5", str(got))
 
+    class NoUmoEvent:
+        unified_msg_origin = ""
+
+    resolved = asyncio.run(personas.resolve_persona_id(core_ctx, NoUmoEvent()))
+    check("运行时记分与控制台同源", resolved == "persona_v5", str(resolved))
+    diag = asyncio.run(personas.explain(core_ctx, NoUmoEvent()))
+    check("诊断输出与记分同源",
+          diag["default_persona"] == "persona_v5" and diag["resolved"] == "persona_v5",
+          str(diag))
+    guard = (ROOT / "webui_api.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in guard.splitlines()
+             if "_resolve_role(" in line and "async def" not in line]
+    check("控制台所有默认角色调用都 await",
+          bool(calls) and all("await _resolve_role(" in line for line in calls), str(calls))
+
     # 2) 合并角色要连事件流水 / 幂等键 / 心情一起搬
     import migrate_self_learning as mig
 

@@ -104,6 +104,21 @@ async function commitMerge() {
 
 const personaCount = (roleId: string) => personas.value.filter((p) => p.role_id === roleId).length;
 
+const systemRoleIds = computed(
+  () => new Set(personas.value.filter((p) => p.persona_kind === "none").map((p) => p.role_id)),
+);
+
+function mergeSystemRole(role: RoleRow) {
+  const target = roles.value.find((r) => r.is_default && r.role_id !== role.role_id);
+  if (!target) {
+    notify("没找到当前默认角色，请用「并入其它角色」手动选择目标", true);
+    return;
+  }
+  mergeSource.value = role;
+  mergeTarget.value = target.role_id;
+  mergeVisible.value = true;
+}
+
 const targetOptions = computed(() =>
   roles.value
     .filter((role) => role.role_id !== mergeSource.value?.role_id)
@@ -160,8 +175,9 @@ onMounted(load);
 
     <p class="faint" style="margin: 0 0 12px">
       「无自定义人格」对应 AstrBot 的 <span class="mono">[%None]</span> 哨兵值：某个会话明确不使用任何人格
-      （多为旧版本迁移遗留）。插件单独给它建角色以免和默认人格混在一起，它不是被删掉的人格；
-      在下方映射表里标为「系统值」。
+      （多为旧版本迁移遗留）。它<strong>不是脏数据</strong>：那一行有会话绑定与真实的好感记录，
+      插件不会自动删有数据的角色；下方映射表里标为「系统值」。不想单独留，就在该行点
+      「并入默认角色」，把这份数据按取最高并进当前默认人格的角色，系统角色随即消失（不可撤销）。
     </p>
 
     <table>
@@ -202,6 +218,16 @@ onMounted(load);
           <td>
             <div class="row" v-if="editing !== role.role_id">
               <n-button size="small" quaternary @click="startAlias(role)">设置别名</n-button>
+              <n-button
+                v-if="systemRoleIds.has(role.role_id)"
+                size="small"
+                quaternary
+                type="warning"
+                :disabled="roles.length < 2"
+                @click="mergeSystemRole(role)"
+              >
+                并入默认角色
+              </n-button>
               <n-button size="small" quaternary :disabled="roles.length < 2" @click="startMerge(role)">
                 并入其它角色
               </n-button>
