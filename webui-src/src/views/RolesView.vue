@@ -24,9 +24,14 @@ const onlyInUse = ref(true);
 const defaultPersona = ref("");
 const defaultSource = ref("");
 const probes = ref<DefaultProbe[]>([]);
-const sourceStale = computed(
-  () => !!defaultSource.value && defaultSource.value !== "context.get_config",
-);
+const sourceStale = computed(() => {
+  const s = defaultSource.value;
+  return (
+    !!s &&
+    s !== "context.get_config" &&
+    s !== "persona_manager.get_default_persona_v3 (核心 API)"
+  );
+});
 
 async function load() {
   busy.value = true;
@@ -144,6 +149,12 @@ onMounted(load);
       </p>
       <div v-for="(p, i) in probes" :key="i" class="mono faint">
         {{ p.source }} → {{ p.error || p.persona_id || "空" }}<template v-if="p.runtime"> · runtime={{ p.runtime }}</template>
+        <div v-if="p.shape" style="padding-left: 12px">
+          类型={{ p.shape.type }} · 顶层键={{ (p.shape.top_keys || []).join(", ") }}
+          <template v-if="p.shape.agent_keys && p.shape.agent_keys.length">
+            · agent 键={{ p.shape.agent_keys.join(", ") }}
+          </template>
+        </div>
       </div>
     </div>
 

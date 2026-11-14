@@ -1,5 +1,47 @@
 # 更新日志
 
+## v0.15.2 (2026-11-14)
+
+**不再由插件猜配置结构，默认人格直接问 AstrBot 核心要**（v0.15.1 的诊断卡实测：
+`context.get_config → 空`、`astrbot_config_mgr.get_conf → 空`，连 `runtime` 都为空，
+来源仍是 `persona_manager.default_persona (启动快照)`，显示旧值「小叽V4」）。
+
+**根因**：
+
+- 两条路径都**成功返回了配置对象**（没有 error），但 `_read_persona_id_from_cfg`
+  开头 `isinstance(cfg, dict)` 以及三层 `isinstance(..., dict)` 守卫把它整份判成无效。
+  用户实际运行的 AstrBot 版本里，配置容器未必是 `dict` 子类，键层级也可能不同。
+- 更根本的问题：插件自己在拼 `agent.config.persona.persona_id` 这类 key，等于持续
+  押注「参考源码 4.29.4 的结构 = 用户实际结构」。而 `PersonaManager` 本来就有
+  `get_default_persona_v3(umo)`，用核心自己的 `acm.get_conf(umo)` 读配置，与
+  `resolve_selected_persona` 完全同源 —— 这才是唯一权威，不该被插件复刻。
+
+**修复**：
+
+- `personas.py`：
+  - 新增 `_as_mapping()`，所有配置读取改 duck typing（只要有 `.get` 就认），
+    去掉全部 `isinstance(..., dict)` 守卫；候选 key 补 `cfg.persona_id`。
+  - 新增 `_cfg_probe()`，把配置容器类型、顶层键、`agent` 键、`runtime`、
+    `persona` 键与两个候选值做成结构摘要塞进 probes（**只列键名，不列配置内容**）。
+  - 新增 `async_default_persona()`，直接 `await persona_manager.get_default_persona_v3(None)`
+    取 `["name"]`。核心在找不到人格时会回落内置 `DEFAULT_PERSONALITY`（name=`default`），
+    这个兜底值不拿来覆盖配置，避免又拿假值冒充。
+- `webui_api.py`：`_current_default()` 改为 async，先做配置读取，再用核心 API 交叉
+  验证；核心给出真实人格 id 且与配置读取不一致时**以核心为准**，来源标成
+  「persona_manager.get_default_persona_v3 (核心 API)」。`h_roles` / `h_roles_personas`
+  相应 await；`_resolve_role()` 是同步函数，继续用同步的 `default_persona_id()`，
+  不牵动其余十几个 handler。
+- 前端：诊断卡每条探测结果追加「类型 / 顶层键 / agent 键」，下次再遇到结构差异
+  一眼可定位；来源为核心 API 时视为正常、不再弹诊断卡。
+- `tests/test_persona_switch()` 新增 3 项：非 dict 子类容器能读到、结构摘要带容器
+  类型与键名、核心 API 返回当前默认人格。核心自检 + 图卡 + 星尘同步全部 PASS。
+
+> 再强调一次口径：截图里 V4 那行「22 会话 · 266 人」是历史会话与分数，不是
+> 「当前生效」。默认人格读对之后，V5 会是另一个角色、分数从 0 开始；要让迁移
+> 进来的旧分数延续，仍需在「角色管理」里合并一次。
+
+版本 v0.15.1 -> v0.15.2。
+
 ## v0.15.1 (2026-11-14)
 
 **控制台把默认人格读成了旧值、以及 `[%None]` 被误标「已移除」**（用户截图三处标注：

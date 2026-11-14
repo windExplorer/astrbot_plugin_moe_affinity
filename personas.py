@@ -30,32 +30,34 @@ def role_label(persona_id: str | None) -> str:
     return pid or DEFAULT_PERSONA
 
 
-def _read_persona_id_from_cfg(cfg) -> str:
-    """从一份 AstrBot 配置里找默认人格 id，不假设 ``agent.runtime`` 的取值。
+def _as_mapping(value):
+    """返回能 ``.get`` 的对象；不要求必须是 ``dict`` 子类。
 
-    4.29.4 是 ``agent.config.persona.persona_id``（runtime == "astrbot"）或
-    ``agent.config.persona_id``；但用户实际运行的版本可能与参考源码不同。v0.15.0
-    按 runtime 二选一，runtime 不是字面量 "astrbot" 时会读到空串，然后静默回落到
-    启动快照，把刚改过的默认人格显示成旧值。这里把已知结构全试一遍。
+    v0.15.1 用 ``isinstance(cfg, dict)`` 做守卫，实测用户环境里两条配置路径都
+    「读到了对象但 persona_id 为空、runtime 也为空」—— 配置容器在部分 AstrBot
+    版本里不是 dict 子类，守卫会直接把整份配置判成无效。这里改成 duck typing。
     """
-    if not isinstance(cfg, dict):
-        return ""
-    agent = cfg.get("agent") or {}
-    if not isinstance(agent, dict):
-        agent = {}
-    runner = agent.get("config") or {}
-    if not isinstance(runner, dict):
-        runner = {}
-    persona = runner.get("persona") or {}
-    settings = cfg.get("provider_settings") or {}
-    if not isinstance(settings, dict):
-        settings = {}
+    if value is None:
+        return {}
+    if callable(getattr(value, "get", None)):
+        return value
+    return {}
+
+
+def _read_persona_id_from_cfg(cfg) -> str:
+    """从一份 AstrBot 配置里找默认人格 id，不假设容器类型 / runtime / 结构版本。"""
+    cfg = _as_mapping(cfg)
+    agent = _as_mapping(cfg.get("agent"))
+    runner = _as_mapping(agent.get("config"))
+    persona = _as_mapping(runner.get("persona"))
+    settings = _as_mapping(cfg.get("provider_settings"))
     candidates = [
-        persona.get("persona_id") if isinstance(persona, dict) else None,
+        persona.get("persona_id"),
         runner.get("persona_id"),
         agent.get("persona_id"),
         settings.get("default_personality"),
         cfg.get("default_personality"),
+        cfg.get("persona_id"),
     ]
     for value in candidates:
         pid = str(value or "").strip()
@@ -64,11 +66,36 @@ def _read_persona_id_from_cfg(cfg) -> str:
     return ""
 
 
+def _cfg_probe(cfg) -> dict:
+    """配置结构摘要：只列键名与候选值，不列配置内容，便于定位版本差异。"""
+    cfg = _as_mapping(cfg)
+    agent = _as_mapping(cfg.get("agent"))
+    runner = _as_mapping(agent.get("config"))
+    persona = _as_mapping(runner.get("persona"))
+
+    def keys_of(obj) -> list[str]:
+        try:
+            return sorted(str(k) for k in obj.keys())[:60]
+        except Exception:
+            return []
+
+    return {
+        "type": type(cfg).__name__,
+        "top_keys": keys_of(cfg),
+        "agent_keys": keys_of(agent),
+        "runtime": str(agent.get("runtime") or ""),
+        "persona_keys": keys_of(persona),
+        "persona_id": str(persona.get("persona_id") or ""),
+        "config_persona_id": str(runner.get("persona_id") or ""),
+    }
+
+
 def default_persona_detail(context, umo: str = "") -> dict:
     """返回 ``{persona_id, source, probes}``，把「这个值从哪读来的」摊开。
 
     配置对象是原地更新的单例，正常情况第一条路径就能拿到当前值；万一读不到，
     宁可明确标出「用的是启动快照」，也不要悄悄拿旧值冒充当前默认人格。
+    每条 probes 还带配置结构摘要，读不到时能一眼看出是容器类型还是键名不同。
     """
     probes: list[dict] = []
     getters = (
@@ -79,12 +106,13 @@ def default_persona_detail(context, umo: str = "") -> dict:
         try:
             cfg = getter()
             pid = _read_persona_id_from_cfg(cfg)
-            runtime = ""
-            try:
-                runtime = str((cfg.get("agent") or {}).get("runtime") or "")
-            except Exception:
-                pass
-            probes.append({"source": label, "persona_id": pid, "runtime": runtime})
+            shape = _cfg_probe(cfg)
+            probes.append({
+                "source": label,
+                "persona_id": pid,
+                "runtime": shape["runtime"],
+                "shape": shape,
+            })
             if pid:
                 return {"persona_id": pid, "source": label, "probes": probes}
         except Exception as exc:
@@ -106,6 +134,26 @@ def default_persona_detail(context, umo: str = "") -> dict:
 def default_persona_id(context, umo: str = "") -> str:
     """当前生效的全局默认人格 id（每次动态读，不缓存）。"""
     return str(default_persona_detail(context, umo).get("persona_id") or DEFAULT_PERSONA)
+
+
+async def async_default_persona(context, umo: str = "") -> str:
+    """直接问 AstrBot 核心要当前默认人格 id，绕开插件对配置结构的一切猜测。
+
+    ``PersonaManager.get_default_persona_v3`` 用核心自己的 ``acm.get_conf(umo)``
+    读配置，与 ``resolve_selected_persona`` 同源；返回 Personality 对象，id 在
+    ``name``。找不到人格时核心会回落内置 ``DEFAULT_PERSONALITY``（name="default"），
+    这种兜底值不能拿来覆盖配置，所以由调用方判断后再采用。
+    """
+    try:
+        manager = getattr(context, "persona_manager", None)
+        if manager is None:
+            return ""
+        obj = await manager.get_default_persona_v3(umo or None)
+        if isinstance(obj, dict):
+            return str(obj.get("name") or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 async def resolve_persona_id(context, event) -> str:

@@ -308,6 +308,15 @@ export interface DefaultProbe {
   persona_id?: string;
   runtime?: string;
   error?: string;
+  shape?: {
+    type: string;
+    top_keys: string[];
+    agent_keys: string[];
+    runtime: string;
+    persona_keys: string[];
+    persona_id: string;
+    config_persona_id: string;
+  };
 }
 
 export interface RoleListData {

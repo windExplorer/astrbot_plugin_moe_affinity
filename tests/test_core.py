@@ -850,6 +850,40 @@ def test_persona_switch():
           personas.role_key(personas.NONE_PERSONA) == "none"
           and personas.role_label(personas.NONE_PERSONA) == "无自定义人格")
 
+    # 配置容器可能不是 dict 子类；核心 API 是最终权威
+    import asyncio
+
+    class MappingLike:
+        def __init__(self, data):
+            self._d = data
+
+        def get(self, key, default=None):
+            return self._d.get(key, default)
+
+        def keys(self):
+            return self._d.keys()
+
+    cfg_like = {
+        "agent": MappingLike({
+            "runtime": "astrbot",
+            "config": MappingLike({"persona": MappingLike({"persona_id": "persona_e"})}),
+        })
+    }
+    check("非 dict 子类容器也读得到",
+          personas.default_persona_id(Ctx(MappingLike(cfg_like), "persona_a")) == "persona_e")
+    shape = personas._cfg_probe(MappingLike(cfg_like))
+    check("结构摘要带顶层键与容器类型",
+          "agent" in shape["top_keys"] and shape["type"] == "MappingLike", str(shape))
+
+    class CoreManager:
+        async def get_default_persona_v3(self, umo=None):
+            return {"name": "persona_v5"}
+
+    core_ctx = Ctx({}, "persona_a")
+    core_ctx.persona_manager = CoreManager()
+    got = asyncio.run(personas.async_default_persona(core_ctx))
+    check("核心 API 拿到当前默认人格", got == "persona_v5", str(got))
+
     # 2) 合并角色要连事件流水 / 幂等键 / 心情一起搬
     import migrate_self_learning as mig
 

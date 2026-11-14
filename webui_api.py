@@ -135,16 +135,40 @@ def _coerce(spec: dict, value: Any) -> Any:
     return text
 
 
-def _current_default(plugin) -> dict:
-    """当前默认人格详情（含读取来源，供控制台诊断「为什么还是旧人格」）。"""
+async def _current_default(plugin) -> dict:
+    """当前默认人格详情：先读配置，再用 AstrBot 核心自己的 API 交叉验证。
+
+    v0.15.1 实测用户环境里插件拼 key 的方式两条路径都读空，只能回落到启动快照
+    拿到旧值。核心的 ``get_default_persona_v3`` 用它自己的 acm 读配置，不经过
+    插件对结构的任何假设，因此以它为准；只有核心给出真实人格 id 时才覆盖，
+    内置 ``default`` 兜底值不算。
+    """
     try:
-        return personas.default_persona_detail(plugin.context)
+        detail = personas.default_persona_detail(plugin.context)
     except Exception as exc:
-        return {
+        detail = {
             "persona_id": personas.DEFAULT_PERSONA,
             "source": f"error: {type(exc).__name__}: {exc}",
             "probes": [],
         }
+    probes = detail.setdefault("probes", [])
+    core_pid = ""
+    try:
+        core_pid = await personas.async_default_persona(plugin.context)
+    except Exception as exc:
+        probes.append({
+            "source": "persona_manager.get_default_persona_v3",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+    detail["core_persona_id"] = core_pid
+    probes.append({
+        "source": "persona_manager.get_default_persona_v3 (核心 API)",
+        "persona_id": core_pid or "空",
+    })
+    if core_pid and core_pid != personas.DEFAULT_PERSONA and core_pid != detail["persona_id"]:
+        detail["persona_id"] = core_pid
+        detail["source"] = "persona_manager.get_default_persona_v3 (核心 API)"
+    return detail
 
 
 def _sync_personas(plugin) -> int:
@@ -185,7 +209,7 @@ def _resolve_role(plugin, role: str | None = None) -> str:
     role_id = (role or "").strip()
     if role_id:
         return role_id
-    default_role = _default_role(plugin, _current_default(plugin)["persona_id"])
+    default_role = _default_role(plugin, personas.default_persona_id(plugin.context))
     if default_role:
         return default_role
     roles = plugin.store.list_roles()
@@ -257,7 +281,7 @@ async def h_roles(plugin) -> dict:
         roles = plugin.store.list_roles()
     bound = await _bound_personas(plugin)
     mapping = plugin.store.role_personas()
-    detail = _current_default(plugin)
+    detail = await _current_default(plugin)
     default_pid = detail["persona_id"]
     default_role = _default_role(plugin, default_pid)
     role_sessions: dict[str, int] = {}
@@ -537,7 +561,7 @@ async def h_roles_personas(plugin) -> dict:
         pass
     roles = {item["role_id"]: item for item in plugin.store.list_roles()}
     bound = await _bound_personas(plugin)
-    detail = _current_default(plugin)
+    detail = await _current_default(plugin)
     default_pid = detail["persona_id"]
     items = []
     for persona_id, role_id in mapping.items():
