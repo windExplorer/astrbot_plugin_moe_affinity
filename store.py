@@ -437,6 +437,30 @@ class AffinityStore:
                     (source_role, src["user_id"]),
                 )
                 merged += 1
+            # 事件流水必须跟着角色搬。老版本只搬 affinities 与 role_personas，
+            # source 角色删掉后，迁移/签到/聊天流水仍挂在悬空的 role_id 上：
+            # 控制台按 role_id 查流水就再也看不到，导入幂等键也失效（重导会翻倍）。
+            conn.execute(
+                "UPDATE events SET role_id = ? WHERE role_id = ?",
+                (target_role, source_role),
+            )
+            # 幂等键里嵌着角色 id（import / checkin / stardust 都是 :<role>: 分段），
+            # 同步改写成 target，否则合并后重新导入会被判成「没导过」。
+            # 万一与 target 已有的键撞唯一索引，OR IGNORE 保留原键即可 ——
+            # 那条记录本来就能被 target 前缀查到，不影响去重。
+            conn.execute(
+                "UPDATE OR IGNORE events SET dedupe_key = replace(dedupe_key, ?, ?)"
+                " WHERE role_id = ? AND instr(dedupe_key, ?) > 0",
+                (f":{source_role}:", f":{target_role}:", target_role, f":{source_role}:"),
+            )
+            # 心情表主键就是 role_id，target 已有基准时不能覆盖，只能丢掉 source 的。
+            if conn.execute("SELECT 1 FROM moods WHERE role_id = ?", (target_role,)).fetchone():
+                conn.execute("DELETE FROM moods WHERE role_id = ?", (source_role,))
+            else:
+                conn.execute(
+                    "UPDATE moods SET role_id = ? WHERE role_id = ?",
+                    (target_role, source_role),
+                )
             conn.execute("DELETE FROM roles WHERE role_id = ?", (source_role,))
             conn.execute("UPDATE roles SET updated_at = ? WHERE role_id = ?", (now, target_role))
         return {"status": "ok", "moved": moved, "merged": merged}

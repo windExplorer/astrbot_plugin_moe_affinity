@@ -1,5 +1,55 @@
 # 更新日志
 
+## v0.15.0 (2026-11-14)
+
+**切换 AstrBot 默认人格后，好感度的角色归属不再滞后**（用户实测：一直用人格 A、旧数据
+也迁移进了角色 A；新建人格 B 并把全局默认人格改成 B 后，控制台「使用中的角色」仍是 A，
+B 既没出现也没转换，不知道该怎么办）。
+
+**现象 / 根因**（对照 AstrBot 4.29.4 `persona_mgr.resolve_selected_persona` 逐条核对）：
+
+1. 走全局默认的那些群聊/私聊，前两级绑定（umo 级强制人格 `session_service_config.persona_id`、
+   `conversation.persona_id`）都是空的，全局默认只是配置值 `agent.config.persona.persona_id`，
+   **不会写进任何会话记录**。而插件的「使用中」只统计这两类绑定 + 已有分数 → 新人格永远
+   0 会话，旧角色却因历史分数一直挂着「使用中」。它是历史痕迹指标，不是「当前生效人格」。
+2. `personas.resolve_persona_id` 的第 3 级读 `persona_manager.default_persona`，那是
+   `PersonaManager.__init__` 从配置算出的**一次性字符串快照**，WebUI 热改默认人格不刷新；
+   核心回复时用的是动态 `acm.get_conf(umo)`。结果：AstrBot 已用新人格说话，好感度还记到
+   旧角色，必须重启才一致 —— 这是真正会记错分的 bug。
+3. 角色只在 `initialize()` 的 `_seed_roles()` 预建、或来消息时 `ensure_role()` 按需建；
+   在 WebUI 新建/改人格插件收不到通知，控制台连目标角色都选不到。
+4. 控制台默认视角取 `list_roles()[0]`，而列表 `ORDER BY r.created_at ASC` → 永远锁在最早
+   建的那个角色，看上去像「没切换」。
+5. `store.merge_roles()` 只搬 `affinities` 和 `role_personas` 就删掉 source 角色：事件流水
+   挂在悬空 `role_id` 上（迁移/签到历史在用户详情里消失），迁移幂等键里还嵌着旧角色 id
+   （合并后重新导入会把同一批人再导一遍、分数翻倍），`moods` 也没搬。
+
+**修复**：
+
+- `personas.py` 新增 `default_persona_id(context, umo)`，按核心口径动态读
+  `context.get_config(umo)` 的 `agent.config.persona.persona_id`（支持 umo → 配置 profile
+  路由），读不到才回落启动快照 / `default`；`resolve_persona_id()` 与 `explain()` 一并
+  改用它 —— 改默认人格当轮生效，不用重启 AstrBot。
+- `webui_api.py`：`_sync_personas()` 在角色列表/映射接口里按 `personas_v3` 幂等补建缺失
+  角色（新建人格不用重启就出现）；`h_roles` / `h_roles_personas` 给当前默认人格对应的
+  角色/人格打 `is_default`，`in_use = sessions > 0 or users > 0 or is_default`，并回传
+  `default_persona`；`_resolve_role()` 默认取默认人格对应角色，不再固定取 `created_at` 第一个。
+- `store.merge_roles()`：合并时把 `events.role_id` 一并改到 target；用 `UPDATE OR IGNORE`
+  把 `dedupe_key` 里 `:<旧角色>:` 改写成 `:<新角色>:`（撞唯一索引时保留原键，去重仍有效）；
+  `moods` 按主键是否冲突决定搬迁或丢弃。不再产生孤儿流水 / 重复导入 / 心情丢失。
+- 前端：`api.ts` 增 `is_default` / `default_persona`；`state.ts` 的 `bootstrap()` 在没手动
+  选过角色（或选中的角色已被合并删掉）时跟 `is_default` 走；`RolesView.vue` 显示当前
+  AstrBot 默认人格 + 「默认」标签，并更新「使用中」口径说明。重建 `pages/affinity-console`。
+- 回归自检 `tests/test_core.py` 新增 `test_persona_switch()` 18 项：动态默认人格 5 项、
+  反向合并（空壳 → 有数据的角色，数据零搬迁）7 项、正向合并（流水/幂等键/心情跟到
+  新角色）6 项；`test_core.py` / `test_card.py` / `test_stardust_sync.py` 全部 PASS。
+
+> 数据迁移口径**没变**：换默认人格不会自动把旧角色的分数搬过去。想让历史分数延续，
+> 在「角色管理」里把**新人格的空壳角色并入旧角色**（方向别反），分数、流水、幂等键全
+> 留在原角色上；现在即便方向点反，正向合并也不会再丢历史了。
+
+版本 v0.14.1 -> v0.15.0。
+
 ## v0.14.1 (2026-11-12)
 
 **/好感度 的总分展示带上两位小数**（用户反馈：图卡大字只有整数，看不出细小变化）。

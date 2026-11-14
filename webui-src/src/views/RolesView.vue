@@ -20,6 +20,7 @@ const mergeSource = ref<RoleRow | null>(null);
 const mergeTarget = ref("");
 const mergeVisible = ref(false);
 const onlyInUse = ref(true);
+const defaultPersona = ref("");
 
 async function load() {
   busy.value = true;
@@ -27,6 +28,7 @@ async function load() {
     const [roleRes, personaRes] = await Promise.all([apiRoles(), apiRolePersonas()]);
     roles.value = roleRes.items;
     personas.value = personaRes.items;
+    defaultPersona.value = roleRes.default_persona || "";
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -117,8 +119,10 @@ onMounted(load);
     </div>
 
     <p class="faint" style="margin: 0 0 12px">
-      别名会用在指令输出（「你与『别名』的关系」）和控制台里；没设别名时，指令退回显示 QQ 昵称。
-      「使用中」= 有会话绑定到该人格，或已有分数记录；两者都没有的空壳不算，关掉上面的开关可以看到全部。
+      当前 AstrBot 默认人格：<span class="mono">{{ defaultPersona || "—" }}</span>（带「默认」标签的角色就是它，
+      改默认人格会实时跟着变，不用重启）。别名会用在指令输出和控制台里；没设别名时，指令退回显示 QQ 昵称。
+      「使用中」= 当前默认人格、有会话绑定到该人格、或已有分数记录；三者都没有的空壳不算，
+      关掉上面的开关可以看到全部。
     </p>
 
     <table>
@@ -143,6 +147,7 @@ onMounted(load);
             <div v-else>
               <div class="row" style="gap: 6px">
                 <span style="font-weight: 550">{{ roleTitle(role) }}</span>
+                <n-tag v-if="role.is_default" size="tiny" round :bordered="false" type="success">默认</n-tag>
                 <n-tag v-if="role.alias" size="tiny" round :bordered="false" type="info">别名</n-tag>
                 <n-tag v-if="!role.in_use" size="tiny" round :bordered="false" type="warning">未使用</n-tag>
               </div>
@@ -195,7 +200,10 @@ onMounted(load);
       </thead>
       <tbody>
         <tr v-for="item in personasView" :key="item.persona_id">
-          <td class="mono">{{ item.persona_id }}</td>
+          <td class="mono">
+            {{ item.persona_id }}
+            <n-tag v-if="item.is_default" size="tiny" round :bordered="false" type="success">默认</n-tag>
+          </td>
           <td>
             <n-tag size="small" round :bordered="false" :type="item.persona_exists ? 'success' : 'warning'">
               {{ item.persona_exists ? "存在" : "已移除" }}

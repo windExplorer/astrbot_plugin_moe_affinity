@@ -117,6 +117,7 @@ export interface RoleRow {
   users: number;
   last_active_at: number;
   in_use: boolean;
+  is_default: boolean;
   bound_sessions: number;
 }
 
@@ -295,6 +296,7 @@ export interface RolePersonaRow {
   role_name: string;
   persona_exists: boolean;
   in_use: boolean;
+  is_default: boolean;
   users: number;
   bound_sessions: number;
   last_active_at: number;
@@ -373,9 +375,10 @@ export interface RulesData {
 export const apiPing = () => apiGet<PingInfo>("/ping");
 export const apiRules = () => apiGet<RulesData>("/rules");
 export const apiMood = (role: string) => apiGet<MoodData>(`/mood?role=${encodeURIComponent(role)}`);
-export const apiRoles = () => apiGet<{ items: RoleRow[]; total: number }>("/roles");
+export const apiRoles = () =>
+  apiGet<{ items: RoleRow[]; total: number; default_persona: string }>("/roles");
 export const apiRolePersonas = () =>
-  apiGet<{ items: RolePersonaRow[]; alive: string[] }>("/roles/personas");
+  apiGet<{ items: RolePersonaRow[]; alive: string[]; default_persona: string }>("/roles/personas");
 export const apiSetRoleAlias = (role_id: string, alias: string) =>
   apiPost<{ role_id: string; alias: string }>("/roles/alias", { role_id, alias });
 export const apiRenameRole = (role_id: string, name: string) =>

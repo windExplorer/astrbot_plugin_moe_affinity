@@ -56,9 +56,11 @@ export async function bootstrap(force = false): Promise<void> {
     app.dbReady = ping.db_ready;
     app.roles = roles.items || [];
     const saved = storageGet(ROLE_KEY) || "";
-    app.role = app.roles.some((r) => r.role_id === saved)
-      ? saved
-      : app.roles[0]?.role_id || "";
+    const selected = app.roles.find((r) => r.role_id === saved);
+    const fallback = app.roles.find((r) => r.is_default) || app.roles[0];
+    // 用户手动选过的角色优先；没选过 / 选中的角色已被合并删掉时，
+    // 跟当前 AstrBot 默认人格走，不再固定落到最早建的那个角色。
+    app.role = selected ? selected.role_id : fallback?.role_id || "";
     app.ready = true;
     app.error = "";
   } catch (e: any) {

@@ -27,7 +27,7 @@ try:  # quart 是 AstrBot 的运行期依赖
 except Exception:  # pragma: no cover - 仅本地静态检查时缺失
     request = None  # type: ignore
 
-from . import checkin_sync, migrate_self_learning, rules_info, stardust_sync, store
+from . import checkin_sync, migrate_self_learning, personas, rules_info, stardust_sync, store
 
 ROUTE_PREFIX = "/astrbot_plugin_moe_affinity"
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -135,11 +135,55 @@ def _coerce(spec: dict, value: Any) -> Any:
     return text
 
 
+def _current_default(plugin) -> str:
+    """当前 AstrBot 全局默认人格 id（动态读配置，不是启动快照）。"""
+    try:
+        return personas.default_persona_id(plugin.context)
+    except Exception:
+        return personas.DEFAULT_PERSONA
+
+
+def _sync_personas(plugin) -> int:
+    """按 AstrBot 当前人格列表补建缺失的角色映射（幂等、纯本地 DB）。
+
+    角色原本只在 ``initialize()`` 的 ``_seed_roles()`` 预建、或来消息时按需建；
+    WebUI 里新建人格 / 改默认人格插件收不到通知，控制台就一直看不到它。
+    角色相关接口每次读列表时补一次，新建人格不用重启 AstrBot 也会出现。
+    """
+    created = 0
+    try:
+        manager = getattr(plugin.context, "persona_manager", None)
+        for persona in getattr(manager, "personas_v3", []) or []:
+            name = str(persona.get("name") or "").strip()
+            if not name:
+                continue
+            if plugin.store.role_of_persona(name) is None:
+                plugin.store.ensure_role(name, name)
+                created += 1
+    except Exception as exc:
+        logger.debug(f"[moe_affinity] 同步人格列表失败（忽略）: {exc}")
+    return created
+
+
+def _default_role(plugin, default_pid: str) -> str | None:
+    try:
+        return plugin.store.role_of_persona(default_pid) if default_pid else None
+    except Exception:
+        return None
+
+
 def _resolve_role(plugin, role: str | None = None) -> str:
-    """没传 role 时取第一个角色（多半是默认人格），没角色就建 default。"""
+    """没传 role 时取「当前默认人格对应的角色」，而不是库里最早建的那个。
+
+    老实现取 ``list_roles()[0]``，而列表按 created_at 升序 —— 换了默认人格后
+    控制台总览/用户列表仍锁死在最初的角色上，看上去像「没切换」。
+    """
     role_id = (role or "").strip()
     if role_id:
         return role_id
+    default_role = _default_role(plugin, _current_default(plugin))
+    if default_role:
+        return default_role
     roles = plugin.store.list_roles()
     if roles:
         return roles[0]["role_id"]
@@ -200,6 +244,7 @@ async def _bound_personas(plugin) -> dict[str, int]:
 
 
 async def h_roles(plugin) -> dict:
+    _sync_personas(plugin)
     roles = plugin.store.list_roles()
     if not roles:
         # 兜底：万一 initialize 没跑到（或人格列表为空），至少给一个可选的默认角色，
@@ -208,6 +253,8 @@ async def h_roles(plugin) -> dict:
         roles = plugin.store.list_roles()
     bound = await _bound_personas(plugin)
     mapping = plugin.store.role_personas()
+    default_pid = _current_default(plugin)
+    default_role = _default_role(plugin, default_pid)
     role_sessions: dict[str, int] = {}
     for item in mapping:
         hits = bound.get(item["persona_id"], 0)
@@ -217,9 +264,12 @@ async def h_roles(plugin) -> dict:
         sessions = role_sessions.get(role["role_id"], 0)
         users = int(role.get("users") or 0)
         role["bound_sessions"] = sessions
-        # 使用中 = 有会话绑定，或者已经有分数记录（人格被删/会话清空但数据还在）
-        role["in_use"] = sessions > 0 or users > 0
-    return ok({"items": roles, "total": len(roles)})
+        role["is_default"] = role["role_id"] == default_role
+        # 使用中 = 有会话绑定 / 已有分数记录 / 就是当前全局默认人格。
+        # 第三项是关键：走全局默认的那些会话前两级绑定都是空的，只统计绑定
+        # 永远看不到「刚改的默认人格」，旧角色反而因历史分数一直挂着「使用中」。
+        role["in_use"] = sessions > 0 or users > 0 or role["is_default"]
+    return ok({"items": roles, "total": len(roles), "default_persona": default_pid})
 
 
 async def h_overview(plugin) -> dict:
@@ -463,6 +513,7 @@ async def h_rules(plugin) -> dict:
 
 async def h_roles_personas(plugin) -> dict:
     """角色 ↔ 人格映射，并标出哪个人格已经从 AstrBot 里删掉。"""
+    _sync_personas(plugin)
     mapping = {item["persona_id"]: item["role_id"] for item in plugin.store.role_personas()}
     alive: set[str] = set()
     try:
@@ -475,24 +526,27 @@ async def h_roles_personas(plugin) -> dict:
         pass
     roles = {item["role_id"]: item for item in plugin.store.list_roles()}
     bound = await _bound_personas(plugin)
+    default_pid = _current_default(plugin)
     items = []
     for persona_id, role_id in mapping.items():
         role = roles.get(role_id) or {}
         users = int(role.get("users") or 0)
         sessions = int(bound.get(persona_id, 0))
+        is_default = persona_id == default_pid
         items.append(
             {
                 "persona_id": persona_id,
                 "role_id": role_id,
                 "role_name": role.get("display_name") or role_id,
                 "persona_exists": persona_id in alive,
-                "in_use": sessions > 0 or users > 0,
+                "is_default": is_default,
+                "in_use": sessions > 0 or users > 0 or is_default,
                 "users": users,
                 "bound_sessions": sessions,
                 "last_active_at": int(role.get("last_active_at") or 0),
             }
         )
-    return ok({"items": items, "alive": sorted(alive)})
+    return ok({"items": items, "alive": sorted(alive), "default_persona": default_pid})
 
 
 async def h_role_alias(plugin) -> dict:

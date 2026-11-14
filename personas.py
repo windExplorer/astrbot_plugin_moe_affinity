@@ -30,6 +30,40 @@ def role_label(persona_id: str | None) -> str:
     return pid or DEFAULT_PERSONA
 
 
+def default_persona_id(context, umo: str = "") -> str:
+    """读当前生效的「全局默认人格」id，与 AstrBot 运行时解析同源。
+
+    AstrBot 4.29.4 的 ``PersonaManager.resolve_selected_persona`` 在会话没有显式
+    绑定人格时，是**每次请求**动态读 ``acm.get_conf(umo)`` 的
+    ``agent.config.persona.persona_id``；而 ``persona_manager.default_persona`` 只是
+    管理器构造时从默认配置算出来的一次性字符串快照，WebUI 热改默认人格不会刷新它。
+    之前这里读快照，导致「AstrBot 已经用新人格回复、好感度还记在旧人格角色上」，
+    必须重启才一致。改成动态读配置后，改默认人格当轮就生效，且支持 umo → 配置
+    profile 路由。读不到时退回快照，最后才回落 ``default``。
+    """
+    try:
+        cfg = context.get_config(umo or None)
+        agent = cfg.get("agent", {}) or {}
+        runner = agent.get("config", {}) or {}
+        if agent.get("runtime") == "astrbot":
+            pid = (runner.get("persona", {}) or {}).get("persona_id", "")
+        else:
+            pid = runner.get("persona_id", "")
+        pid = str(pid or "").strip()
+        if pid:
+            return pid
+    except Exception:
+        pass
+    try:
+        manager = getattr(context, "persona_manager", None)
+        pid = str(getattr(manager, "default_persona", "") or "").strip() if manager else ""
+        if pid:
+            return pid
+    except Exception:
+        pass
+    return DEFAULT_PERSONA
+
+
 async def resolve_persona_id(context, event) -> str:
     """解析当前事件最终生效的人格 id（与 AstrBot 回复时用的那一套优先级一致）。"""
     umo = str(getattr(event, "unified_msg_origin", "") or "")
@@ -63,15 +97,8 @@ async def resolve_persona_id(context, event) -> str:
         except Exception:
             pass
 
-    # 3) 全局默认人格
-    try:
-        manager = getattr(context, "persona_manager", None)
-        pid = str(getattr(manager, "default_persona", "") or "").strip() if manager else ""
-        if pid:
-            return pid
-    except Exception:
-        pass
-    return DEFAULT_PERSONA
+    # 3) 全局默认人格（动态读配置，不用启动时的快照）
+    return default_persona_id(context, umo)
 
 
 async def explain(context, event) -> dict:
@@ -113,13 +140,7 @@ async def explain(context, event) -> dict:
         except Exception as exc:
             info["conversation_persona"] = f"<读取失败: {exc}>"
 
-    try:
-        manager = getattr(context, "persona_manager", None)
-        info["default_persona"] = (
-            str(getattr(manager, "default_persona", "") or "").strip() if manager else ""
-        )
-    except Exception:
-        pass
+    info["default_persona"] = default_persona_id(context, umo)
 
     if info["session_override"] and not info["session_override"].startswith("<"):
         info["resolved"] = info["session_override"]

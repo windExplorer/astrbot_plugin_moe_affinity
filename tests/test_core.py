@@ -793,6 +793,83 @@ def test_backdate_and_rebuild():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 人格切换
+def test_persona_switch():
+    """换默认人格 / 合并角色时，归属与历史数据都要跟着走。"""
+    import types
+
+    print("[persona switch]")
+
+    # 1) 默认人格必须动态读配置，不能读启动时的 default_persona 快照
+    ast_mod = types.ModuleType("astrbot")
+    api_mod = types.ModuleType("astrbot.api")
+    api_mod.sp = types.SimpleNamespace(get_async=None, session_get=None)
+    ast_mod.api = api_mod
+    sys.modules.setdefault("astrbot", ast_mod)
+    sys.modules.setdefault("astrbot.api", api_mod)
+    import personas  # noqa: E402
+
+    class Ctx:
+        def __init__(self, cfg, snapshot):
+            self.cfg = cfg
+            self.persona_manager = types.SimpleNamespace(default_persona=snapshot)
+
+        def get_config(self, umo=None):
+            return self.cfg
+
+    cfg_a = {"agent": {"runtime": "astrbot", "config": {"persona": {"persona_id": "persona_a"}}}}
+    cfg_b = {"agent": {"runtime": "astrbot", "config": {"persona": {"persona_id": "persona_b"}}}}
+    ctx = Ctx(cfg_a, "persona_a")
+    check("默认人格读动态配置", personas.default_persona_id(ctx) == "persona_a")
+    ctx.cfg = cfg_b  # 模拟 WebUI 热改默认人格，不重启
+    check("热改默认人格立即生效", personas.default_persona_id(ctx) == "persona_b",
+          str(personas.default_persona_id(ctx)))
+    check("不再落到启动快照", personas.default_persona_id(ctx) != "persona_a")
+    check("读不到配置时回落快照", personas.default_persona_id(Ctx({}, "persona_a")) == "persona_a")
+    check("全都没有时回落 default",
+          personas.default_persona_id(Ctx({}, "")) == personas.DEFAULT_PERSONA)
+
+    # 2) 合并角色要连事件流水 / 幂等键 / 心情一起搬
+    import migrate_self_learning as mig
+
+    tmp = Path(tempfile.mkdtemp(prefix="moe_affinity_switch_"))
+    try:
+        db = store.AffinityStore(tmp / "s.db")
+        rules = store.Rules()
+        role_a = db.ensure_role("persona_a")
+        role_b = db.ensure_role("persona_b")
+        db.apply_event(role_id=role_a, user_id="u1", code=mig.CODE, delta=120.0,
+                       source=mig.SOURCE, rules=rules,
+                       dedupe_key=mig.dedupe_key(role_a, "u1"))
+        db.apply_event(role_id=role_a, user_id="u1", code="chat.message", delta=1,
+                       source="core", rules=rules)
+        db.save_mood(role_a, {"joy": 8, "anger": 2, "sorrow": 3, "fear": 1},
+                     baseline=5, now=1000)
+
+        # 反向合并（B -> A）：B 是空壳，A 的数据一行都不该动
+        result = db.merge_roles(role_a, role_b)
+        check("空壳并入有数据的角色", result["status"] == "ok", str(result))
+        check("反向合并后原角色还在", db.role_of_persona("persona_a") == role_a)
+        check("反向合并后新人格也指向原角色", db.role_of_persona("persona_b") == role_a)
+        check("反向合并后角色只剩一个", len(db.list_roles()) == 1, str(db.list_roles()))
+        check("反向合并分数不变", db.snapshot(role_a, "u1", rules)["score"] >= 120.0)
+        check("反向合并流水还在", len(db.recent_events(role_a, "u1", 10)) >= 2)
+        check("反向合并不产生孤儿流水", not db.recent_events(role_b, "u1", 10))
+
+        # 正向合并（A -> B2）：分数、流水、幂等键、心情都要跟到新角色
+        role_b2 = db.ensure_role("persona_b2")
+        result = db.merge_roles(role_b2, role_a)
+        check("正向归并执行", result["status"] == "ok", str(result))
+        check("新角色拿到分数", db.snapshot(role_b2, "u1", rules)["score"] >= 120.0)
+        check("事件流水跟到新角色", len(db.recent_events(role_b2, "u1", 10)) >= 2)
+        check("旧角色不再有流水", not db.recent_events(role_a, "u1", 10))
+        imported = db.imported_user_ids(mig.role_prefix(role_b2))
+        check("迁移幂等键跟到新角色", "u1" in imported, str(imported))
+        check("心情跟到新角色", db.get_mood(role_b2) is not None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_schema()
     test_stage()
@@ -810,6 +887,7 @@ def main():
     test_migration()
     test_checkin_sync()
     test_backdate_and_rebuild()
+    test_persona_switch()
     print()
     if FAILED:
         print(f"RESULT: FAIL ({len(FAILED)}): " + ", ".join(FAILED))
