@@ -5,6 +5,7 @@ import {
   apiRolePersonas,
   apiRoles,
   apiSetRoleAlias,
+  type DefaultProbe,
   type RolePersonaRow,
   type RoleRow,
 } from "../api";
@@ -21,6 +22,11 @@ const mergeTarget = ref("");
 const mergeVisible = ref(false);
 const onlyInUse = ref(true);
 const defaultPersona = ref("");
+const defaultSource = ref("");
+const probes = ref<DefaultProbe[]>([]);
+const sourceStale = computed(
+  () => !!defaultSource.value && defaultSource.value !== "context.get_config",
+);
 
 async function load() {
   busy.value = true;
@@ -29,6 +35,8 @@ async function load() {
     roles.value = roleRes.items;
     personas.value = personaRes.items;
     defaultPersona.value = roleRes.default_persona || "";
+    defaultSource.value = roleRes.default_persona_source || "";
+    probes.value = roleRes.default_persona_probes || [];
   } catch (e: any) {
     notify(e?.message || String(e), true);
   } finally {
@@ -119,10 +127,30 @@ onMounted(load);
     </div>
 
     <p class="faint" style="margin: 0 0 12px">
-      当前 AstrBot 默认人格：<span class="mono">{{ defaultPersona || "—" }}</span>（带「默认」标签的角色就是它，
-      改默认人格会实时跟着变，不用重启）。别名会用在指令输出和控制台里；没设别名时，指令退回显示 QQ 昵称。
-      「使用中」= 当前默认人格、有会话绑定到该人格、或已有分数记录；三者都没有的空壳不算，
-      关掉上面的开关可以看到全部。
+      当前 AstrBot 默认人格：<span class="mono">{{ defaultPersona || "—" }}</span>
+      <span v-if="defaultSource"> · 读取来源：{{ defaultSource }}</span>
+      （带「默认」标签的角色就是它，改默认人格会实时跟着变，不用重启）。别名会用在指令输出和控制台里；
+      没设别名时，指令退回显示 QQ 昵称。「使用中」= 当前默认人格、有会话绑定到该人格、或已有分数记录；
+      三者都没有的空壳不算，关掉上面的开关可以看到全部。
+    </p>
+
+    <div v-if="sourceStale" class="card" style="margin: 0 0 12px; padding: 10px 12px">
+      <div class="card-h" style="margin: 0 0 6px">
+        <div class="card-t">默认人格读取诊断</div>
+        <n-tag size="tiny" round :bordered="false" type="warning">没能从配置读到</n-tag>
+      </div>
+      <p class="faint" style="margin: 0 0 6px">
+        现在用的是回退值，可能与 AstrBot WebUI 里刚改的默认人格不一致。下面是逐条读取结果：
+      </p>
+      <div v-for="(p, i) in probes" :key="i" class="mono faint">
+        {{ p.source }} → {{ p.error || p.persona_id || "空" }}<template v-if="p.runtime"> · runtime={{ p.runtime }}</template>
+      </div>
+    </div>
+
+    <p class="faint" style="margin: 0 0 12px">
+      「无自定义人格」对应 AstrBot 的 <span class="mono">[%None]</span> 哨兵值：某个会话明确不使用任何人格
+      （多为旧版本迁移遗留）。插件单独给它建角色以免和默认人格混在一起，它不是被删掉的人格；
+      在下方映射表里标为「系统值」。
     </p>
 
     <table>
@@ -205,7 +233,10 @@ onMounted(load);
             <n-tag v-if="item.is_default" size="tiny" round :bordered="false" type="success">默认</n-tag>
           </td>
           <td>
-            <n-tag size="small" round :bordered="false" :type="item.persona_exists ? 'success' : 'warning'">
+            <n-tag v-if="item.persona_kind === 'none'" size="small" round :bordered="false" type="info">
+              系统值
+            </n-tag>
+            <n-tag v-else size="small" round :bordered="false" :type="item.persona_exists ? 'success' : 'warning'">
               {{ item.persona_exists ? "存在" : "已移除" }}
             </n-tag>
           </td>

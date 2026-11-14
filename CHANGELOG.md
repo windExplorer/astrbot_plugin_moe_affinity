@@ -1,5 +1,53 @@
 # 更新日志
 
+## v0.15.1 (2026-11-14)
+
+**控制台把默认人格读成了旧值、以及 `[%None]` 被误标「已移除」**（用户截图三处标注：
+AstrBot WebUI「默认采用的人格 = 小叽V5」，插件却显示「当前 AstrBot 默认人格：小叽V4」；
+角色列表冒出「无自定义人格 / `[%None]`」不知是什么；映射表里同一行标「已移除」）。
+
+**根因**：
+
+1. v0.15.0 的 `default_persona_id()` 按 `agent.runtime == "astrbot"` 二选一决定读
+   `agent.config.persona.persona_id` 还是 `agent.config.persona_id`。用户实际运行的
+   AstrBot 版本配置结构未必与参考源码 4.29.4 一致，runtime 不是这个字面量（或结构
+   不同）时读出来是空串，函数就**静默回落**到 `persona_manager.default_persona`
+   —— 那是启动时算好的一次性字符串快照，正是旧值「小叽V4」。配置对象本身没问题
+   （`Context._config` 与 `AstrBotConfigManager.confs["default"]` 是同一实例，WebUI
+   保存时原地 `update`），问题在「读法太挑 + 失败时悄悄拿旧值顶上」。
+2. `[%None]` 是 AstrBot「该会话明确不使用任何人格」的**哨兵值**（v3→v4 迁移把旧
+   `conversation.persona_id` 原样搬过来，或旧客户端写入），核心在
+   `resolve_selected_persona` 里对它特判，`personas_v3` 名册里从来不会有它。
+   `h_roles_personas` 用名册判 `persona_exists` → 显示「已移除」，属误报；角色列表里
+   「无自定义人格」是插件按设计给它单独建的 `none` 角色，不是幽灵人格。
+3. 顺带澄清：截图里 V4 那行「22 会话 · 266 人」是**历史会话绑定与分数记录**，不是
+   「当前仍生效」。即使默认人格读对了，这些历史数据仍留在 V4 角色上；新人格 V5 会
+   另起一个角色、分数从 0 开始。想让分数延续要在「角色管理」里合并，口径未变。
+   「未使用 31」则是按 `personas_v3` 预建 / 历史累积的空壳角色，不是故障。
+
+**修复**：
+
+- `personas.py`：新增 `_read_persona_id_from_cfg()`，不判断 runtime，把已知结构
+  （`agent.config.persona.persona_id` / `agent.config.persona_id` / `agent.persona_id` /
+  `provider_settings.default_personality` / 顶层 `default_personality`）全试一遍；
+  取配置也由单路改成 `context.get_config()` + `context.astrbot_config_mgr.get_conf()`
+  双路兜底。新增 `default_persona_detail()` 返回 `{persona_id, source, probes}`，把
+  「这个值从哪读来的」和逐路径探测结果（含 runtime / 异常）一起交给控制台；
+  `default_persona_id()` 只取其中的 id。回落到启动快照时**显式标注来源**，不再伪装
+  成当前配置值。
+- `webui_api.py`：`_current_default()` 改回传详情；`h_roles` / `h_roles_personas`
+  回传 `default_persona_source` / `default_persona_probes`。映射表新增
+  `persona_kind`，`[%None]` 标为 `none` 且不计入「已移除」。
+- 前端：`api.ts` 增 `DefaultProbe` / `RoleListData` / `RolePersonaData` 类型；
+  `RolesView.vue` 显示「读取来源」，来源不是配置时展开「默认人格读取诊断」卡逐条
+  列出探测结果；状态列把哨兵显示为「系统值」；补一段 `[%None]` 与「无自定义人格」
+  的说明。重建 `pages/affinity-console`。
+- `tests/test_persona_switch()` 新增 6 项：非 astrbot runtime / 无 runtime 字段都能
+  读到、来源标为配置、探测记录带 runtime、回退来源标为启动快照、`[%None]` 单独成
+  `none` 角色。核心自检 + 图卡 + 星尘同步全部 PASS。
+
+版本 v0.15.0 -> v0.15.1。
+
 ## v0.15.0 (2026-11-14)
 
 **切换 AstrBot 默认人格后，好感度的角色归属不再滞后**（用户实测：一直用人格 A、旧数据

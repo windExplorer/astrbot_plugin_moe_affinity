@@ -829,6 +829,27 @@ def test_persona_switch():
     check("全都没有时回落 default",
           personas.default_persona_id(Ctx({}, "")) == personas.DEFAULT_PERSONA)
 
+    # 不同 AstrBot 版本的配置结构：不能因为 runtime 不是字面量 astrbot 就读空
+    cfg_alt = {"agent": {"runtime": "other", "config": {"persona_id": "persona_c"}}}
+    check("非 astrbot runtime 也读得到",
+          personas.default_persona_id(Ctx(cfg_alt, "persona_a")) == "persona_c")
+    cfg_nested = {"agent": {"config": {"persona": {"persona_id": "persona_d"}}}}
+    check("无 runtime 字段也读得到",
+          personas.default_persona_id(Ctx(cfg_nested, "persona_a")) == "persona_d")
+    detail = personas.default_persona_detail(Ctx(cfg_b, "persona_a"))
+    check("来源标为配置",
+          detail["source"] == "context.get_config" and detail["persona_id"] == "persona_b",
+          str(detail))
+    check("探测记录带 runtime",
+          any(p.get("runtime") == "astrbot" for p in detail["probes"]), str(detail["probes"]))
+    detail_fb = personas.default_persona_detail(Ctx({}, "persona_a"))
+    check("回退来源标为启动快照",
+          "启动快照" in detail_fb["source"] and detail_fb["persona_id"] == "persona_a",
+          str(detail_fb))
+    check("[%None] 单独成 none 角色",
+          personas.role_key(personas.NONE_PERSONA) == "none"
+          and personas.role_label(personas.NONE_PERSONA) == "无自定义人格")
+
     # 2) 合并角色要连事件流水 / 幂等键 / 心情一起搬
     import migrate_self_learning as mig
 

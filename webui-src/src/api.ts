@@ -295,11 +295,35 @@ export interface RolePersonaRow {
   role_id: string;
   role_name: string;
   persona_exists: boolean;
+  persona_kind: "persona" | "none";
   in_use: boolean;
   is_default: boolean;
   users: number;
   bound_sessions: number;
   last_active_at: number;
+}
+
+export interface DefaultProbe {
+  source: string;
+  persona_id?: string;
+  runtime?: string;
+  error?: string;
+}
+
+export interface RoleListData {
+  items: RoleRow[];
+  total: number;
+  default_persona: string;
+  default_persona_source: string;
+  default_persona_probes: DefaultProbe[];
+}
+
+export interface RolePersonaData {
+  items: RolePersonaRow[];
+  alive: string[];
+  default_persona: string;
+  default_persona_source: string;
+  default_persona_probes: DefaultProbe[];
 }
 
 export interface MigrateItem {
@@ -375,10 +399,8 @@ export interface RulesData {
 export const apiPing = () => apiGet<PingInfo>("/ping");
 export const apiRules = () => apiGet<RulesData>("/rules");
 export const apiMood = (role: string) => apiGet<MoodData>(`/mood?role=${encodeURIComponent(role)}`);
-export const apiRoles = () =>
-  apiGet<{ items: RoleRow[]; total: number; default_persona: string }>("/roles");
-export const apiRolePersonas = () =>
-  apiGet<{ items: RolePersonaRow[]; alive: string[]; default_persona: string }>("/roles/personas");
+export const apiRoles = () => apiGet<RoleListData>("/roles");
+export const apiRolePersonas = () => apiGet<RolePersonaData>("/roles/personas");
 export const apiSetRoleAlias = (role_id: string, alias: string) =>
   apiPost<{ role_id: string; alias: string }>("/roles/alias", { role_id, alias });
 export const apiRenameRole = (role_id: string, name: string) =>

@@ -135,12 +135,16 @@ def _coerce(spec: dict, value: Any) -> Any:
     return text
 
 
-def _current_default(plugin) -> str:
-    """当前 AstrBot 全局默认人格 id（动态读配置，不是启动快照）。"""
+def _current_default(plugin) -> dict:
+    """当前默认人格详情（含读取来源，供控制台诊断「为什么还是旧人格」）。"""
     try:
-        return personas.default_persona_id(plugin.context)
-    except Exception:
-        return personas.DEFAULT_PERSONA
+        return personas.default_persona_detail(plugin.context)
+    except Exception as exc:
+        return {
+            "persona_id": personas.DEFAULT_PERSONA,
+            "source": f"error: {type(exc).__name__}: {exc}",
+            "probes": [],
+        }
 
 
 def _sync_personas(plugin) -> int:
@@ -181,7 +185,7 @@ def _resolve_role(plugin, role: str | None = None) -> str:
     role_id = (role or "").strip()
     if role_id:
         return role_id
-    default_role = _default_role(plugin, _current_default(plugin))
+    default_role = _default_role(plugin, _current_default(plugin)["persona_id"])
     if default_role:
         return default_role
     roles = plugin.store.list_roles()
@@ -253,7 +257,8 @@ async def h_roles(plugin) -> dict:
         roles = plugin.store.list_roles()
     bound = await _bound_personas(plugin)
     mapping = plugin.store.role_personas()
-    default_pid = _current_default(plugin)
+    detail = _current_default(plugin)
+    default_pid = detail["persona_id"]
     default_role = _default_role(plugin, default_pid)
     role_sessions: dict[str, int] = {}
     for item in mapping:
@@ -269,7 +274,13 @@ async def h_roles(plugin) -> dict:
         # 第三项是关键：走全局默认的那些会话前两级绑定都是空的，只统计绑定
         # 永远看不到「刚改的默认人格」，旧角色反而因历史分数一直挂着「使用中」。
         role["in_use"] = sessions > 0 or users > 0 or role["is_default"]
-    return ok({"items": roles, "total": len(roles), "default_persona": default_pid})
+    return ok({
+        "items": roles,
+        "total": len(roles),
+        "default_persona": default_pid,
+        "default_persona_source": detail["source"],
+        "default_persona_probes": detail.get("probes") or [],
+    })
 
 
 async def h_overview(plugin) -> dict:
@@ -526,19 +537,24 @@ async def h_roles_personas(plugin) -> dict:
         pass
     roles = {item["role_id"]: item for item in plugin.store.list_roles()}
     bound = await _bound_personas(plugin)
-    default_pid = _current_default(plugin)
+    detail = _current_default(plugin)
+    default_pid = detail["persona_id"]
     items = []
     for persona_id, role_id in mapping.items():
         role = roles.get(role_id) or {}
         users = int(role.get("users") or 0)
         sessions = int(bound.get(persona_id, 0))
         is_default = persona_id == default_pid
+        # [%None] 是 AstrBot「该会话明确不使用人格」的哨兵值，从来不在
+        # personas_v3 里。按人名册判存在性会把它误标成「已移除」。
+        is_none = persona_id == personas.NONE_PERSONA
         items.append(
             {
                 "persona_id": persona_id,
                 "role_id": role_id,
                 "role_name": role.get("display_name") or role_id,
-                "persona_exists": persona_id in alive,
+                "persona_kind": "none" if is_none else "persona",
+                "persona_exists": is_none or persona_id in alive,
                 "is_default": is_default,
                 "in_use": sessions > 0 or users > 0 or is_default,
                 "users": users,
@@ -546,7 +562,13 @@ async def h_roles_personas(plugin) -> dict:
                 "last_active_at": int(role.get("last_active_at") or 0),
             }
         )
-    return ok({"items": items, "alive": sorted(alive), "default_persona": default_pid})
+    return ok({
+        "items": items,
+        "alive": sorted(alive),
+        "default_persona": default_pid,
+        "default_persona_source": detail["source"],
+        "default_persona_probes": detail.get("probes") or [],
+    })
 
 
 async def h_role_alias(plugin) -> dict:

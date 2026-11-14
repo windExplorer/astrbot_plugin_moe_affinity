@@ -30,38 +30,82 @@ def role_label(persona_id: str | None) -> str:
     return pid or DEFAULT_PERSONA
 
 
-def default_persona_id(context, umo: str = "") -> str:
-    """读当前生效的「全局默认人格」id，与 AstrBot 运行时解析同源。
+def _read_persona_id_from_cfg(cfg) -> str:
+    """从一份 AstrBot 配置里找默认人格 id，不假设 ``agent.runtime`` 的取值。
 
-    AstrBot 4.29.4 的 ``PersonaManager.resolve_selected_persona`` 在会话没有显式
-    绑定人格时，是**每次请求**动态读 ``acm.get_conf(umo)`` 的
-    ``agent.config.persona.persona_id``；而 ``persona_manager.default_persona`` 只是
-    管理器构造时从默认配置算出来的一次性字符串快照，WebUI 热改默认人格不会刷新它。
-    之前这里读快照，导致「AstrBot 已经用新人格回复、好感度还记在旧人格角色上」，
-    必须重启才一致。改成动态读配置后，改默认人格当轮就生效，且支持 umo → 配置
-    profile 路由。读不到时退回快照，最后才回落 ``default``。
+    4.29.4 是 ``agent.config.persona.persona_id``（runtime == "astrbot"）或
+    ``agent.config.persona_id``；但用户实际运行的版本可能与参考源码不同。v0.15.0
+    按 runtime 二选一，runtime 不是字面量 "astrbot" 时会读到空串，然后静默回落到
+    启动快照，把刚改过的默认人格显示成旧值。这里把已知结构全试一遍。
     """
-    try:
-        cfg = context.get_config(umo or None)
-        agent = cfg.get("agent", {}) or {}
-        runner = agent.get("config", {}) or {}
-        if agent.get("runtime") == "astrbot":
-            pid = (runner.get("persona", {}) or {}).get("persona_id", "")
-        else:
-            pid = runner.get("persona_id", "")
-        pid = str(pid or "").strip()
-        if pid:
+    if not isinstance(cfg, dict):
+        return ""
+    agent = cfg.get("agent") or {}
+    if not isinstance(agent, dict):
+        agent = {}
+    runner = agent.get("config") or {}
+    if not isinstance(runner, dict):
+        runner = {}
+    persona = runner.get("persona") or {}
+    settings = cfg.get("provider_settings") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    candidates = [
+        persona.get("persona_id") if isinstance(persona, dict) else None,
+        runner.get("persona_id"),
+        agent.get("persona_id"),
+        settings.get("default_personality"),
+        cfg.get("default_personality"),
+    ]
+    for value in candidates:
+        pid = str(value or "").strip()
+        if pid and pid != NONE_PERSONA:
             return pid
-    except Exception:
-        pass
+    return ""
+
+
+def default_persona_detail(context, umo: str = "") -> dict:
+    """返回 ``{persona_id, source, probes}``，把「这个值从哪读来的」摊开。
+
+    配置对象是原地更新的单例，正常情况第一条路径就能拿到当前值；万一读不到，
+    宁可明确标出「用的是启动快照」，也不要悄悄拿旧值冒充当前默认人格。
+    """
+    probes: list[dict] = []
+    getters = (
+        ("context.get_config", lambda: context.get_config(umo or None)),
+        ("astrbot_config_mgr.get_conf", lambda: context.astrbot_config_mgr.get_conf(umo or None)),
+    )
+    for label, getter in getters:
+        try:
+            cfg = getter()
+            pid = _read_persona_id_from_cfg(cfg)
+            runtime = ""
+            try:
+                runtime = str((cfg.get("agent") or {}).get("runtime") or "")
+            except Exception:
+                pass
+            probes.append({"source": label, "persona_id": pid, "runtime": runtime})
+            if pid:
+                return {"persona_id": pid, "source": label, "probes": probes}
+        except Exception as exc:
+            probes.append({"source": label, "error": f"{type(exc).__name__}: {exc}"})
     try:
         manager = getattr(context, "persona_manager", None)
         pid = str(getattr(manager, "default_persona", "") or "").strip() if manager else ""
         if pid:
-            return pid
-    except Exception:
-        pass
-    return DEFAULT_PERSONA
+            return {
+                "persona_id": pid,
+                "source": "persona_manager.default_persona (启动快照)",
+                "probes": probes,
+            }
+    except Exception as exc:
+        probes.append({"source": "启动快照", "error": f"{type(exc).__name__}: {exc}"})
+    return {"persona_id": DEFAULT_PERSONA, "source": "fallback", "probes": probes}
+
+
+def default_persona_id(context, umo: str = "") -> str:
+    """当前生效的全局默认人格 id（每次动态读，不缓存）。"""
+    return str(default_persona_detail(context, umo).get("persona_id") or DEFAULT_PERSONA)
 
 
 async def resolve_persona_id(context, event) -> str:
